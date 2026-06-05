@@ -1,0 +1,31 @@
+# Web framework
+fastapi==0.115.5
+uvicorn[standard]==0.32.1
+
+# Database
+sqlalchemy==2.0.36
+asyncpg==0.30.0
+greenlet==3.5.0
+alembic==1.14.0
+
+# Settings & validation
+pydantic==2.10.3
+pydantic-settings==2.6.1
+pydantic[email]==2.10.3
+
+# Auth / security
+python-jose[cryptography]==3.3.0
+passlib[bcrypt]==1.7.4
+bcrypt==3.2.2
+
+# AI
+google-genai==1.10.0
+
+# HTTP client (for webhooks / external calls)
+httpx==0.28.1
+
+# Utilities
+python-multipart==0.0.17
+
+# Rate limiting
+slowapi==0.1.9

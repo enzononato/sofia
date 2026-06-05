@@ -1,0 +1,536 @@
+"use client";
+
+import { useEffect, useRef, useState, useCallback } from "react";
+import { Contact, Message, useMessages, useSendMessage, useSendMedia, useUpdateContact } from "@/hooks/useInbox";
+import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar";
+import { Button } from "@/components/ui/button";
+import { Dialog, DialogContent } from "@/components/ui/dialog";
+import {
+  Bot, Phone, Send, User, PauseCircle, PlayCircle, Loader2,
+  Mic, Square, Paperclip, Image as ImageIcon, FileText, X, Download,
+} from "lucide-react";
+import { cn } from "@/lib/utils";
+import { format } from "date-fns";
+import { ptBR } from "date-fns/locale";
+
+// Render the appropriate bubble content for a message:
+//  - new media (media_url set): pick by media_type
+//  - legacy outbound audio (content starts with "data:audio/"): inline audio
+//  - everything else: plain text
+function MessageContent({
+  msg,
+  onOpenImage,
+}: {
+  msg: Message;
+  onOpenImage: (url: string) => void;
+}) {
+  if (msg.media_url) {
+    if (msg.media_type === "audio") {
+      return (
+        <audio controls className="max-w-[240px] h-10">
+          <source src={msg.media_url} type={msg.media_mime_type || "audio/ogg"} />
+        </audio>
+      );
+    }
+    if (msg.media_type === "image") {
+      return (
+        <div className="flex flex-col gap-1">
+          <button
+            type="button"
+            onClick={() => onOpenImage(msg.media_url!)}
+            className="block overflow-hidden rounded-lg"
+          >
+            <img
+              src={msg.media_url}
+              alt={msg.content || "Imagem"}
+              className="max-w-[280px] max-h-[280px] object-cover hover:opacity-90 transition-opacity cursor-zoom-in"
+            />
+          </button>
+          {msg.content && (
+            <p className="whitespace-pre-wrap leading-relaxed text-sm">{msg.content}</p>
+          )}
+        </div>
+      );
+    }
+    if (msg.media_type === "video") {
+      return (
+        <div className="flex flex-col gap-1">
+          <video controls className="max-w-[280px] max-h-[280px] rounded-lg">
+            <source src={msg.media_url} type={msg.media_mime_type || "video/mp4"} />
+          </video>
+          {msg.content && (
+            <p className="whitespace-pre-wrap leading-relaxed text-sm">{msg.content}</p>
+          )}
+        </div>
+      );
+    }
+    if (msg.media_type === "document") {
+      const fileName = msg.content || "documento";
+      return (
+        <div className="flex flex-col gap-1">
+          <a
+            href={msg.media_url}
+            download={fileName}
+            className="flex items-center gap-2 px-3 py-2 rounded-lg border border-border/50 bg-background/50 hover:bg-background transition-colors max-w-[260px]"
+          >
+            <FileText className="h-5 w-5 shrink-0 opacity-70" />
+            <span className="truncate text-sm flex-1">{fileName}</span>
+            <Download className="h-4 w-4 shrink-0 opacity-50" />
+          </a>
+        </div>
+      );
+    }
+  }
+
+  // Legacy: outbound audio stored directly in content as data URI
+  if (msg.content.startsWith("data:audio/")) {
+    return (
+      <audio controls className="max-w-[240px] h-10">
+        <source src={msg.content} type="audio/webm" />
+      </audio>
+    );
+  }
+
+  return <p className="whitespace-pre-wrap leading-relaxed">{msg.content}</p>;
+}
+
+interface ChatWindowProps {
+  contact: Contact;
+}
+
+export function ChatWindow({ contact }: ChatWindowProps) {
+  const { data: messages, isLoading } = useMessages(contact.id);
+  const { mutate: sendMessage, isPending: isSending } = useSendMessage();
+  const { mutate: sendMedia, isPending: isSendingMedia } = useSendMedia();
+  const { mutate: updateContact, isPending: isUpdatingStatus } = useUpdateContact();
+  const [inputText, setInputText] = useState("");
+  const scrollContainerRef = useRef<HTMLDivElement>(null);
+  const hasScrolledRef = useRef(false);
+  const inputRef = useRef<HTMLInputElement>(null);
+  const fileInputRef = useRef<HTMLInputElement>(null);
+
+  // Audio recording state
+  const [isRecording, setIsRecording] = useState(false);
+  const [recordingTime, setRecordingTime] = useState(0);
+  const mediaRecorderRef = useRef<MediaRecorder | null>(null);
+  const audioChunksRef = useRef<Blob[]>([]);
+  const recordingTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
+
+  // Attachment menu
+  const [showAttachMenu, setShowAttachMenu] = useState(false);
+
+  // Image lightbox (click on inbound image to expand)
+  const [lightboxImage, setLightboxImage] = useState<string | null>(null);
+
+  const isBusy = isSending || isSendingMedia;
+
+  // Scroll to bottom on initial load
+  useEffect(() => {
+    hasScrolledRef.current = false;
+  }, [contact.id]);
+
+  useEffect(() => {
+    if (!isLoading && messages && scrollContainerRef.current) {
+      const { scrollTop, scrollHeight, clientHeight } = scrollContainerRef.current;
+      // If user is within 150px from the bottom, or if it's the first load
+      const isAtBottom = scrollHeight - scrollTop - clientHeight < 150;
+      
+      if (!hasScrolledRef.current || isAtBottom) {
+        scrollContainerRef.current.scrollTop = scrollContainerRef.current.scrollHeight;
+        hasScrolledRef.current = true;
+      }
+    }
+  }, [messages, isLoading]);
+
+  const pauseAIIfNeeded = useCallback(() => {
+    if (!contact.ai_paused) {
+      updateContact({ id: contact.id, data: { ai_paused: true } });
+    }
+  }, [contact.ai_paused, contact.id, updateContact]);
+
+  const scrollToBottom = useCallback(() => {
+    if (scrollContainerRef.current) {
+      setTimeout(() => {
+        if (scrollContainerRef.current) {
+          scrollContainerRef.current.scrollTop = scrollContainerRef.current.scrollHeight;
+        }
+      }, 200);
+    }
+  }, []);
+
+  const handleSend = (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!inputText.trim() || isBusy) return;
+
+    sendMessage(
+      { contactId: contact.id, content: inputText },
+      {
+        onSuccess: () => {
+          setInputText("");
+          pauseAIIfNeeded();
+          scrollToBottom();
+          inputRef.current?.focus();
+        },
+        onError: () => alert("Erro ao enviar mensagem."),
+      }
+    );
+  };
+
+  const handleToggleAI = () => {
+    updateContact({ id: contact.id, data: { ai_paused: !contact.ai_paused } });
+  };
+
+  // ── Audio Recording ───────────────────────────────────────────────────
+  const startRecording = async () => {
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      const mediaRecorder = new MediaRecorder(stream, { mimeType: "audio/webm" });
+      mediaRecorderRef.current = mediaRecorder;
+      audioChunksRef.current = [];
+
+      mediaRecorder.ondataavailable = (e) => {
+        if (e.data.size > 0) audioChunksRef.current.push(e.data);
+      };
+
+      mediaRecorder.onstop = () => {
+        stream.getTracks().forEach((t) => t.stop());
+        const blob = new Blob(audioChunksRef.current, { type: "audio/webm" });
+        sendAudioBlob(blob);
+      };
+
+      mediaRecorder.start();
+      setIsRecording(true);
+      setRecordingTime(0);
+      recordingTimerRef.current = setInterval(() => {
+        setRecordingTime((t) => t + 1);
+      }, 1000);
+    } catch {
+      alert("Não foi possível acessar o microfone. Verifique as permissões do navegador.");
+    }
+  };
+
+  const stopRecording = () => {
+    mediaRecorderRef.current?.stop();
+    setIsRecording(false);
+    if (recordingTimerRef.current) clearInterval(recordingTimerRef.current);
+  };
+
+  const cancelRecording = () => {
+    if (mediaRecorderRef.current && mediaRecorderRef.current.state !== "inactive") {
+      mediaRecorderRef.current.ondataavailable = null;
+      mediaRecorderRef.current.onstop = () => {
+        mediaRecorderRef.current?.stream.getTracks().forEach((t) => t.stop());
+      };
+      mediaRecorderRef.current.stop();
+    }
+    setIsRecording(false);
+    setRecordingTime(0);
+    if (recordingTimerRef.current) clearInterval(recordingTimerRef.current);
+  };
+
+  const sendAudioBlob = (blob: Blob) => {
+    const reader = new FileReader();
+    reader.onloadend = () => {
+      const base64 = reader.result as string;
+      sendMedia(
+        { contactId: contact.id, media_type: "audio", media: base64 },
+        {
+          onSuccess: () => { pauseAIIfNeeded(); scrollToBottom(); },
+          onError: () => alert("Erro ao enviar áudio."),
+        }
+      );
+    };
+    reader.readAsDataURL(blob);
+  };
+
+  const formatTime = (s: number) =>
+    `${Math.floor(s / 60).toString().padStart(2, "0")}:${(s % 60).toString().padStart(2, "0")}`;
+
+  // ── File Attachment ───────────────────────────────────────────────────
+  const handleFileSelect = (accept: string) => {
+    setShowAttachMenu(false);
+    if (fileInputRef.current) {
+      fileInputRef.current.accept = accept;
+      fileInputRef.current.click();
+    }
+  };
+
+  const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+
+    const reader = new FileReader();
+    reader.onloadend = () => {
+      const base64 = reader.result as string;
+      const isImage = file.type.startsWith("image/");
+      sendMedia(
+        {
+          contactId: contact.id,
+          media_type: isImage ? "image" : "document",
+          media: base64,
+          file_name: file.name,
+        },
+        {
+          onSuccess: () => { pauseAIIfNeeded(); scrollToBottom(); },
+          onError: () => alert("Erro ao enviar arquivo."),
+        }
+      );
+    };
+    reader.readAsDataURL(file);
+    e.target.value = "";
+  };
+
+  // Messages arrive from backend most recent first — reverse for UI
+  const displayMessages = messages ? [...messages].reverse() : [];
+
+  return (
+    <div className="flex flex-col h-full min-h-0 overflow-hidden bg-background/50">
+      {/* ── Header ── */}
+      <div className="flex-shrink-0 flex items-center gap-4 p-4 border-b border-border/50 bg-card/80 backdrop-blur-md shadow-sm z-10">
+        <Avatar className="h-10 w-10 border border-border/50">
+          <AvatarImage src={contact.profile_picture_url || ""} />
+          <AvatarFallback className="bg-primary/5 text-primary">
+            <User className="h-4 w-4" />
+          </AvatarFallback>
+        </Avatar>
+        <div className="flex flex-col flex-1">
+          <div className="flex items-center gap-2">
+            <span className="font-semibold">{contact.full_name}</span>
+            {contact.whatsapp_name && contact.whatsapp_name !== contact.full_name && (
+              <span className="text-xs text-muted-foreground">~{contact.whatsapp_name}</span>
+            )}
+          </div>
+          <div className="flex items-center text-xs text-muted-foreground gap-1">
+            <Phone className="h-3 w-3" />
+            {contact.phone || "Sem telefone"}
+          </div>
+        </div>
+
+        {/* AI Handoff Toggle */}
+        <div className="flex items-center gap-3 bg-background/50 px-3 py-2 rounded-xl border border-border/50">
+          <span className="text-xs font-medium">Sofia:</span>
+          <button
+            onClick={handleToggleAI}
+            disabled={isUpdatingStatus}
+            className={cn(
+              "flex items-center gap-1.5 px-2.5 py-1.5 rounded-md text-xs font-semibold transition-all",
+              contact.ai_paused
+                ? "bg-amber-500/10 text-amber-500 hover:bg-amber-500/20"
+                : "bg-emerald-500/10 text-emerald-500 hover:bg-emerald-500/20",
+              isUpdatingStatus && "opacity-50 cursor-not-allowed"
+            )}
+          >
+            {isUpdatingStatus ? (
+              <Loader2 className="h-3.5 w-3.5 animate-spin" />
+            ) : contact.ai_paused ? (
+              <><PauseCircle className="h-3.5 w-3.5" /> Pausada</>
+            ) : (
+              <><PlayCircle className="h-3.5 w-3.5" /> Ativa</>
+            )}
+          </button>
+        </div>
+      </div>
+
+      {/* ── Messages ── */}
+      <div ref={scrollContainerRef} className="flex-1 min-h-0 overflow-y-auto p-4 flex flex-col">
+        {isLoading ? (
+          <div className="flex flex-col gap-4">
+            {[1, 2, 3].map((i) => (
+              <div
+                key={i}
+                className={cn(
+                  "max-w-[70%] rounded-2xl p-4 animate-pulse",
+                  i % 2 === 0
+                    ? "bg-primary/20 self-end rounded-br-none"
+                    : "bg-muted self-start rounded-bl-none"
+                )}
+              >
+                <div className="h-4 w-32 bg-background/50 rounded mb-2" />
+                <div className="h-3 w-20 bg-background/50 rounded" />
+              </div>
+            ))}
+          </div>
+        ) : displayMessages.length === 0 ? (
+          <div className="flex-1 flex flex-col items-center justify-center text-muted-foreground">
+            <Bot className="h-12 w-12 mb-4 opacity-20" />
+            <p>Nenhuma mensagem ainda.</p>
+          </div>
+        ) : (
+          <>
+            <div className="flex-1" />
+            <div className="flex flex-col gap-3">
+              {displayMessages.map((msg) => {
+                const isOutbound = msg.direction?.toUpperCase() === "OUTBOUND";
+                const isAI = msg.ai_model_used != null;
+                return (
+                  <div
+                    key={msg.id}
+                    className={cn(
+                      "flex flex-col max-w-[80%] relative",
+                      isOutbound ? "self-end items-end" : "self-start items-start"
+                    )}
+                  >
+                    <div
+                      className={cn(
+                        "px-4 py-2.5 rounded-2xl text-sm shadow-sm",
+                        isOutbound
+                          ? "bg-primary text-primary-foreground rounded-br-none"
+                          : "bg-card border border-border/50 text-card-foreground rounded-bl-none"
+                      )}
+                    >
+                      <MessageContent msg={msg} onOpenImage={setLightboxImage} />
+                    </div>
+                    <div className="flex items-center gap-1 mt-1 px-1 text-[10px] text-muted-foreground">
+                      <span>{format(new Date(msg.created_at), "HH:mm", { locale: ptBR })}</span>
+                      {isOutbound && isAI && (
+                        <span className="flex items-center gap-1 ml-1 text-primary/70 font-medium">
+                          <Bot className="h-3 w-3" /> Sofia
+                        </span>
+                      )}
+                      {isOutbound && !isAI && (
+                        <span className="flex items-center gap-1 ml-1 text-muted-foreground font-medium">
+                          <User className="h-3 w-3" /> Equipe
+                        </span>
+                      )}
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          </>
+        )}
+      </div>
+
+      {/* ── Input Bar (WhatsApp Web style) ── */}
+      <div className="flex-shrink-0 bg-card/80 backdrop-blur-md border-t border-border/50">
+        {/* Hidden file input */}
+        <input
+          ref={fileInputRef}
+          type="file"
+          className="hidden"
+          onChange={handleFileChange}
+        />
+
+        {isRecording ? (
+          /* ── Recording Mode ── */
+          <div className="flex items-center gap-3 px-4 py-3">
+            <button
+              onClick={cancelRecording}
+              className="h-10 w-10 rounded-full flex items-center justify-center text-destructive hover:bg-destructive/10 transition-colors"
+              title="Cancelar"
+            >
+              <X className="h-5 w-5" />
+            </button>
+
+            <div className="flex-1 flex items-center gap-3 bg-destructive/5 rounded-full px-4 py-2">
+              <span className="w-2.5 h-2.5 rounded-full bg-red-500 animate-pulse" />
+              <span className="text-sm font-mono text-destructive font-medium">
+                {formatTime(recordingTime)}
+              </span>
+              <span className="text-xs text-muted-foreground">Gravando áudio...</span>
+            </div>
+
+            <button
+              onClick={stopRecording}
+              className="h-11 w-11 rounded-full bg-primary flex items-center justify-center text-primary-foreground shadow-md shadow-primary/20 hover:bg-primary/90 transition-colors"
+              title="Enviar áudio"
+            >
+              <Send className="h-5 w-5 ml-0.5" />
+            </button>
+          </div>
+        ) : (
+          /* ── Normal Mode ── */
+          <form onSubmit={handleSend} className="flex items-center gap-2 px-4 py-3">
+            {/* Attachment Button */}
+            <div className="relative">
+              <button
+                type="button"
+                onClick={() => setShowAttachMenu((v) => !v)}
+                className="h-10 w-10 rounded-full flex items-center justify-center text-muted-foreground hover:text-foreground hover:bg-muted/50 transition-colors"
+                title="Anexar"
+              >
+                <Paperclip className="h-5 w-5" />
+              </button>
+
+              {showAttachMenu && (
+                <div className="absolute bottom-12 left-0 bg-card border border-border/50 rounded-xl shadow-xl p-2 flex flex-col gap-1 min-w-[160px] z-20 animate-in slide-in-from-bottom-2 fade-in duration-200">
+                  <button
+                    type="button"
+                    onClick={() => handleFileSelect("image/*")}
+                    className="flex items-center gap-3 px-3 py-2 text-sm rounded-lg hover:bg-muted/50 transition-colors"
+                  >
+                    <ImageIcon className="h-4 w-4 text-emerald-500" />
+                    Fotos
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => handleFileSelect(".pdf,.doc,.docx,.xls,.xlsx,.txt,.csv")}
+                    className="flex items-center gap-3 px-3 py-2 text-sm rounded-lg hover:bg-muted/50 transition-colors"
+                  >
+                    <FileText className="h-4 w-4 text-blue-500" />
+                    Documento
+                  </button>
+                </div>
+              )}
+            </div>
+
+            {/* Text Input */}
+            <input
+              ref={inputRef}
+              type="text"
+              value={inputText}
+              onChange={(e) => setInputText(e.target.value)}
+              onFocus={() => setShowAttachMenu(false)}
+              placeholder="Digitar mensagem"
+              className="flex-1 bg-background/80 border border-border/50 rounded-full px-5 h-11 text-sm placeholder:text-muted-foreground focus:outline-none focus:ring-2 focus:ring-primary/30 focus:border-primary/50 transition-all"
+              disabled={isBusy}
+            />
+
+            {/* Send or Mic Button */}
+            {inputText.trim() ? (
+              <Button
+                type="submit"
+                size="icon"
+                className="rounded-full h-11 w-11 shrink-0 shadow-md shadow-primary/20"
+                disabled={isBusy}
+              >
+                {isBusy ? (
+                  <Loader2 className="h-5 w-5 animate-spin" />
+                ) : (
+                  <Send className="h-5 w-5 ml-0.5" />
+                )}
+              </Button>
+            ) : (
+              <button
+                type="button"
+                onClick={startRecording}
+                disabled={isBusy}
+                className={cn(
+                  "h-11 w-11 rounded-full flex items-center justify-center shrink-0 transition-colors",
+                  "text-muted-foreground hover:text-foreground hover:bg-muted/50",
+                  isBusy && "opacity-50 cursor-not-allowed"
+                )}
+                title="Gravar áudio"
+              >
+                <Mic className="h-5 w-5" />
+              </button>
+            )}
+          </form>
+        )}
+      </div>
+
+      {/* Image lightbox — opens when an inbound image is clicked */}
+      <Dialog open={lightboxImage !== null} onOpenChange={(open) => !open && setLightboxImage(null)}>
+        <DialogContent className="max-w-[90vw] max-h-[90vh] p-2 bg-black/95 border-0">
+          {lightboxImage && (
+            <img
+              src={lightboxImage}
+              alt="Imagem em tamanho real"
+              className="w-full h-auto max-h-[85vh] object-contain"
+            />
+          )}
+        </DialogContent>
+      </Dialog>
+    </div>
+  );
+}

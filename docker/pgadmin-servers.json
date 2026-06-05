@@ -1,0 +1,15 @@
+{
+  "Servers": {
+    "1": {
+      "Name": "Clinic SaaS (local)",
+      "Group": "Servers",
+      "Host": "postgres",
+      "Port": 5432,
+      "MaintenanceDB": "clinic_saas",
+      "Username": "postgres",
+      "Password": "postgres",
+      "SSLMode": "prefer",
+      "SavePassword": true
+    }
+  }
+}
