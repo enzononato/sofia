@@ -22,7 +22,7 @@ export interface Appointment {
   professional_id: string | null;
   scheduled_at: string;
   ends_at: string | null;
-  status: "SCHEDULED" | "CONFIRMED" | "CANCELLED" | "COMPLETED" | "NO_SHOW";
+  status: "scheduled" | "confirmed" | "in_progress" | "completed" | "cancelled" | "no_show";
   notes: string | null;
   cancellation_reason: string | null;
 }

@@ -12,6 +12,7 @@ from app.models.base import TenantScopedMixin
 if TYPE_CHECKING:
     from app.models.tenant import Tenant
     from app.models.appointment import Appointment
+    from app.models.user import User
 
 
 class Service(TenantScopedMixin, Base):
@@ -37,6 +38,11 @@ class Service(TenantScopedMixin, Base):
     # Relationships
     tenant: Mapped["Tenant"] = relationship(back_populates="services")
     appointments: Mapped[list["Appointment"]] = relationship(back_populates="service")
+    # Professionals (users) who offer this service (Fase 2)
+    professionals: Mapped[list["User"]] = relationship(
+        secondary="professional_services",
+        back_populates="offered_services",
+    )
 
     def __repr__(self) -> str:
         return f"<Service name={self.name!r} duration={self.duration_minutes}min tenant={self.tenant_id}>"

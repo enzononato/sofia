@@ -138,7 +138,8 @@ async def generate_reply(
     stage, appts = await ai_stages.analyze(db, contact, history)
     overlay = ai_stages.overlay_for(stage, ai_cfg)
     context_block = ai_stages.build_context_block(contact, stage, appts)
-    system_prompt = f"{base_prompt}\n\n{overlay}\n\n{context_block}"
+    clinic_identity = f"Você é a secretária virtual da clínica \"{tenant.name}\"."
+    system_prompt = f"{base_prompt}\n\n{clinic_identity}\n\n{overlay}\n\n{context_block}"
 
     logger.debug(
         "ai_prompt_composed",
@@ -241,6 +242,7 @@ async def generate_reply(
             tenant_id=uuid.UUID(str(tenant.id)),
             contact_id=uuid.UUID(str(contact.id)),
             tenant_settings=tenant.settings,
+            ai_config=ai_cfg,
         )
 
         logger.info(

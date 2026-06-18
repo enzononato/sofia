@@ -8,6 +8,7 @@ POST /auth/logout    — revoke a refresh token
 """
 
 import logging
+from datetime import datetime, timezone
 
 from fastapi import APIRouter, Request, status
 from pydantic import BaseModel, EmailStr, Field
@@ -141,6 +142,8 @@ async def login(payload: LoginRequest, request: Request, db: DBSession):
 
     if not user.is_active:
         raise ForbiddenError("User account is deactivated.", code="user_deactivated")
+
+    user.last_login_at = datetime.now(timezone.utc)
 
     pair = await issue_token_pair(
         db,

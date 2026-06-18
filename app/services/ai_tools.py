@@ -16,14 +16,24 @@ from datetime import date, datetime, time, timedelta, timezone
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from google.genai import types
-from sqlalchemy import select
+from sqlalchemy import select, text
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import selectinload
 
 from app.models.appointment import Appointment, AppointmentStatus
 from app.models.contact import Contact
+from app.models.professional import ProfessionalWorkHours, professional_services
 from app.models.service import Service
+from app.models.user import User
 
 logger = logging.getLogger(__name__)
+
+# Scheduling modes (tenant.ai_config["scheduling_mode"]):
+#   "capacity"         — Fase 1: N parallel appointments per clinic (settings.schedule.capacity)
+#   "per_professional" — Fase 3: availability + booking are per professional
+SCHEDULING_CAPACITY = "capacity"
+SCHEDULING_PER_PROFESSIONAL = "per_professional"
 
 # ---------------------------------------------------------------------------
 # Tool declarations (schema sent to Gemini)
@@ -55,7 +65,11 @@ _check_availability_decl = types.FunctionDeclaration(
             ),
             "service_id": types.Schema(
                 type=types.Type.STRING,
-                description="UUID do serviço (opcional). Se informado, considera a duração do serviço.",
+                description="UUID do serviço. Necessário quando a clínica agenda por profissional.",
+            ),
+            "professional_id": types.Schema(
+                type=types.Type.STRING,
+                description="UUID do profissional (opcional). Use para ver a agenda de um profissional específico.",
             ),
         },
         required=["date"],
@@ -78,7 +92,14 @@ _create_appointment_decl = types.FunctionDeclaration(
             ),
             "service_id": types.Schema(
                 type=types.Type.STRING,
-                description="UUID do serviço agendado (opcional mas recomendado)",
+                description="UUID do serviço agendado (recomendado; obrigatório quando a clínica agenda por profissional)",
+            ),
+            "professional_id": types.Schema(
+                type=types.Type.STRING,
+                description=(
+                    "UUID do profissional escolhido. Informe quando o paciente escolher o profissional. "
+                    "Se houver só um profissional disponível no horário, pode omitir que o sistema atribui."
+                ),
             ),
             "notes": types.Schema(
                 type=types.Type.STRING,
@@ -143,6 +164,10 @@ _reschedule_appointment_decl = types.FunctionDeclaration(
                 type=types.Type.STRING,
                 description="UUID do novo serviço (opcional — só se o paciente quiser trocar de serviço)",
             ),
+            "new_professional_id": types.Schema(
+                type=types.Type.STRING,
+                description="UUID do novo profissional (opcional — só se o paciente quiser trocar de profissional)",
+            ),
         },
         required=["appointment_id", "new_scheduled_at"],
     ),
@@ -188,6 +213,24 @@ _update_contact_info_decl = types.FunctionDeclaration(
     ),
 )
 
+_list_professionals_decl = types.FunctionDeclaration(
+    name="list_professionals",
+    description=(
+        "Lista os profissionais da clínica e quais serviços cada um realiza. "
+        "Use quando o paciente perguntar quem atende, pedir um profissional específico, "
+        "ou quando precisar apresentar opções de profissional para um serviço."
+    ),
+    parameters=types.Schema(
+        type=types.Type.OBJECT,
+        properties={
+            "service_id": types.Schema(
+                type=types.Type.STRING,
+                description="UUID do serviço (opcional). Se informado, lista só quem realiza esse serviço.",
+            ),
+        },
+    ),
+)
+
 # Single Tool object bundling all declarations
 CLINIC_TOOLS = types.Tool(
     function_declarations=[
@@ -199,6 +242,7 @@ CLINIC_TOOLS = types.Tool(
         _reschedule_appointment_decl,
         _get_clinic_info_decl,
         _update_contact_info_decl,
+        _list_professionals_decl,
     ]
 )
 
@@ -213,22 +257,31 @@ async def execute_tool(
     tenant_id: uuid.UUID,
     contact_id: uuid.UUID,
     tenant_settings: dict | None = None,
+    ai_config: dict | None = None,
 ) -> dict:
     """
     Dispatch a Gemini function call to the appropriate handler.
     tenant_id and contact_id are ALWAYS taken from the request context — never from args.
-    tenant_settings is passed through for schedule-aware tools (check_availability).
+    tenant_settings is passed through for schedule-aware tools; ai_config selects the
+    scheduling mode (capacity vs per_professional).
     """
     logger.info("Executing tool '%s' args=%s tenant=%s", name, args, tenant_id)
 
+    settings_ = tenant_settings or {}
+    per_prof = (ai_config or {}).get("scheduling_mode") == SCHEDULING_PER_PROFESSIONAL
+
     if name == "list_services":
-        return await _list_services(db, tenant_id)
+        return await _list_services(db, tenant_id, per_prof)
 
     if name == "check_availability":
-        return await _check_availability(db, tenant_id, tenant_settings or {}, args)
+        if per_prof:
+            return await _check_availability_pp(db, tenant_id, settings_, args)
+        return await _check_availability(db, tenant_id, settings_, args)
 
     if name == "create_appointment":
-        return await _create_appointment(db, tenant_id, contact_id, args)
+        if per_prof:
+            return await _create_appointment_pp(db, tenant_id, contact_id, settings_, args)
+        return await _create_appointment(db, tenant_id, contact_id, settings_, args)
 
     if name == "get_upcoming_appointments":
         return await _get_upcoming_appointments(db, tenant_id, contact_id)
@@ -237,29 +290,213 @@ async def execute_tool(
         return await _cancel_appointment(db, tenant_id, contact_id, args)
 
     if name == "reschedule_appointment":
-        return await _reschedule_appointment(db, tenant_id, contact_id, args)
+        if per_prof:
+            return await _reschedule_appointment_pp(db, tenant_id, contact_id, settings_, args)
+        return await _reschedule_appointment(db, tenant_id, contact_id, settings_, args)
 
     if name == "get_clinic_info":
-        return await _get_clinic_info(tenant_settings or {})
+        return await _get_clinic_info(settings_)
 
     if name == "update_contact_info":
         return await _update_contact_info(db, tenant_id, contact_id, args)
 
+    if name == "list_professionals":
+        return await _list_professionals(db, tenant_id, args)
+
     return {"error": f"Unknown tool: {name}"}
+
+
+# ---------------------------------------------------------------------------
+# Scheduling helpers (shared by availability + booking validation)
+# ---------------------------------------------------------------------------
+
+_DEFAULT_SLOT_MINUTES = 60
+
+
+def _clinic_tz(tenant_settings: dict) -> ZoneInfo:
+    """Resolve the clinic timezone, falling back to UTC on invalid/missing config."""
+    tz_name = ((tenant_settings or {}).get("schedule", {}) or {}).get("timezone", "UTC")
+    try:
+        return ZoneInfo(tz_name)
+    except ZoneInfoNotFoundError:
+        logger.warning("Invalid timezone '%s' — falling back to UTC", tz_name)
+        return ZoneInfo("UTC")
+
+
+def _resolve_schedule(tenant_settings: dict, target_date: date) -> dict:
+    """
+    Normalize the tenant schedule config for a given date. All fields optional;
+    sensible defaults apply. `capacity` is the number of appointments the clinic
+    can run in parallel (≈ professionals/rooms) — defaults to 1.
+    """
+    schedule = (tenant_settings or {}).get("schedule", {}) or {}
+    tz = _clinic_tz(tenant_settings)
+
+    working_days: list[int] = schedule.get("working_days", [1, 2, 3, 4, 5])
+
+    try:
+        open_t = time.fromisoformat(schedule.get("open_time", "08:00"))
+        close_t = time.fromisoformat(schedule.get("close_time", "18:00"))
+    except ValueError:
+        open_t, close_t = time(8, 0), time(18, 0)
+
+    lunch_range: tuple[datetime, datetime] | None = None
+    if schedule.get("lunch_start") and schedule.get("lunch_end"):
+        try:
+            lunch_range = (
+                datetime.combine(target_date, time.fromisoformat(schedule["lunch_start"]), tzinfo=tz),
+                datetime.combine(target_date, time.fromisoformat(schedule["lunch_end"]), tzinfo=tz),
+            )
+        except ValueError:
+            pass
+
+    try:
+        capacity = int(schedule.get("capacity", 1))
+    except (TypeError, ValueError):
+        capacity = 1
+    capacity = max(capacity, 1)
+
+    return {
+        "tz": tz,
+        "working_days": working_days,
+        "open_t": open_t,
+        "close_t": close_t,
+        "lunch_range": lunch_range,
+        "capacity": capacity,
+        "schedule": schedule,
+    }
+
+
+async def _booked_windows(
+    db: AsyncSession,
+    tenant_id: uuid.UUID,
+    tz: ZoneInfo,
+    range_start: datetime,
+    range_end: datetime,
+    exclude_id: uuid.UUID | None = None,
+    professional_id: uuid.UUID | None = None,
+) -> list[tuple[datetime, datetime]]:
+    """
+    Return real (start, end) windows (in `tz`) of non-cancelled appointments that
+    overlap the [range_start, range_end) interval. Duration comes from `ends_at`
+    when present, otherwise from the service duration, otherwise a 60-min fallback.
+    When `professional_id` is given, only that professional's appointments count.
+    """
+    q = select(Appointment).where(
+        Appointment.tenant_id == tenant_id,
+        Appointment.status != AppointmentStatus.CANCELLED,
+        Appointment.scheduled_at < range_end,
+    )
+    if exclude_id is not None:
+        q = q.where(Appointment.id != exclude_id)
+    if professional_id is not None:
+        q = q.where(Appointment.professional_id == professional_id)
+    booked = (await db.execute(q)).scalars().all()
+
+    # Batch-fetch durations only for rows lacking ends_at (avoids N+1)
+    missing_ids = {a.service_id for a in booked if a.service_id and a.ends_at is None}
+    durations: dict[uuid.UUID, int] = {}
+    if missing_ids:
+        svcs = await db.execute(select(Service).where(Service.id.in_(missing_ids)))
+        durations = {s.id: s.duration_minutes for s in svcs.scalars().all()}
+
+    windows: list[tuple[datetime, datetime]] = []
+    for appt in booked:
+        start = appt.scheduled_at.astimezone(tz)
+        if appt.ends_at:
+            end = appt.ends_at.astimezone(tz)
+        elif appt.service_id in durations:
+            end = start + timedelta(minutes=durations[appt.service_id])
+        else:
+            end = start + timedelta(minutes=_DEFAULT_SLOT_MINUTES)
+        if end > range_start:
+            windows.append((start, end))
+    return windows
+
+
+async def _validate_booking(
+    db: AsyncSession,
+    tenant_id: uuid.UUID,
+    tenant_settings: dict,
+    start: datetime,
+    end: datetime,
+    exclude_id: uuid.UUID | None = None,
+) -> str | None:
+    """
+    Validate a booking window [start, end) against the clinic schedule.
+    Returns an error message string if invalid, or None if the slot is bookable.
+
+    Checks: working day, within business hours, outside lunch break, and that the
+    number of overlapping appointments is below the clinic `capacity`.
+
+    NOTE: callers must hold the per-tenant advisory lock (see `_lock_tenant`) so the
+    overlap count cannot change between this check and the subsequent insert/update.
+    """
+    tz = _clinic_tz(tenant_settings)
+    local_start = start.astimezone(tz)
+    local_end = end.astimezone(tz)
+    target_date = local_start.date()
+
+    sched = _resolve_schedule(tenant_settings, target_date)
+
+    if target_date.isoweekday() not in sched["working_days"]:
+        return "A clínica não atende neste dia da semana. Escolha outro dia."
+
+    day_open = datetime.combine(target_date, sched["open_t"], tzinfo=tz)
+    day_close = datetime.combine(target_date, sched["close_t"], tzinfo=tz)
+    if local_start < day_open or local_end > day_close:
+        return (
+            f"O horário está fora do expediente "
+            f"({sched['open_t'].strftime('%H:%M')}–{sched['close_t'].strftime('%H:%M')})."
+        )
+
+    lunch = sched["lunch_range"]
+    if lunch and local_start < lunch[1] and local_end > lunch[0]:
+        return "O horário coincide com o intervalo de almoço da clínica."
+
+    windows = await _booked_windows(
+        db, tenant_id, tz, local_start, local_end, exclude_id=exclude_id
+    )
+    if len(windows) >= sched["capacity"]:
+        return "Esse horário acabou de ser preenchido. Por favor, escolha outro horário disponível."
+
+    return None
+
+
+async def _lock_tenant(db: AsyncSession, tenant_id: uuid.UUID) -> None:
+    """
+    Acquire a transaction-scoped Postgres advisory lock keyed on the tenant.
+    Serializes concurrent booking writes for the same clinic so the
+    check→insert window cannot be raced into a double-booking. The lock is
+    released automatically when the surrounding transaction commits/rolls back.
+    """
+    await db.execute(
+        text("SELECT pg_advisory_xact_lock(hashtext(:k)::bigint)"),
+        {"k": str(tenant_id)},
+    )
 
 
 # ---------------------------------------------------------------------------
 # Handlers
 # ---------------------------------------------------------------------------
 
-async def _list_services(db: AsyncSession, tenant_id: uuid.UUID) -> dict:
-    result = await db.execute(
-        select(Service).where(
-            Service.tenant_id == tenant_id,
-            Service.is_active == True,  # noqa: E712
-        ).order_by(Service.name)
+async def _list_services(
+    db: AsyncSession, tenant_id: uuid.UUID, per_professional: bool = False
+) -> dict:
+    query = select(Service).where(
+        Service.tenant_id == tenant_id,
+        Service.is_active == True,  # noqa: E712
     )
-    services = result.scalars().all()
+    if per_professional:
+        # Only offer services that have at least one active professional linked,
+        # since per-professional scheduling cannot book a service nobody performs.
+        linked = (
+            select(professional_services.c.service_id)
+            .join(User, User.id == professional_services.c.professional_id)
+            .where(User.tenant_id == tenant_id, User.is_active == True)  # noqa: E712
+        )
+        query = query.where(Service.id.in_(linked))
+    services = (await db.execute(query.order_by(Service.name))).scalars().all()
     return {
         "services": [
             {
@@ -308,44 +545,20 @@ async def _check_availability(
     except (KeyError, ValueError):
         return {"error": "Formato de data inválido. Use YYYY-MM-DD."}
 
-    # ── Schedule config with defaults ────────────────────────────────────────
-    schedule = tenant_settings.get("schedule", {})
-
-    tz_name: str = schedule.get("timezone", "UTC")
-    try:
-        tz = ZoneInfo(tz_name)
-    except ZoneInfoNotFoundError:
-        logger.warning("Invalid timezone '%s' for tenant %s — falling back to UTC", tz_name, tenant_id)
-        tz = ZoneInfo("UTC")
-
-    working_days: list[int] = schedule.get("working_days", [1, 2, 3, 4, 5])
+    sched = _resolve_schedule(tenant_settings, target_date)
+    tz = sched["tz"]
+    capacity = sched["capacity"]
 
     # Closed day — return early before any DB work
-    if target_date.isoweekday() not in working_days:
+    if target_date.isoweekday() not in sched["working_days"]:
         return {
             "date": args["date"],
             "available_slots": [],
             "message": "A clínica não atende neste dia da semana.",
         }
 
-    try:
-        open_t = time.fromisoformat(schedule.get("open_time", "08:00"))
-        close_t = time.fromisoformat(schedule.get("close_time", "18:00"))
-    except ValueError:
-        open_t, close_t = time(8, 0), time(18, 0)
-
-    lunch_range: tuple[datetime, datetime] | None = None
-    if schedule.get("lunch_start") and schedule.get("lunch_end"):
-        try:
-            lunch_range = (
-                datetime.combine(target_date, time.fromisoformat(schedule["lunch_start"]), tzinfo=tz),
-                datetime.combine(target_date, time.fromisoformat(schedule["lunch_end"]), tzinfo=tz),
-            )
-        except ValueError:
-            pass
-
     # ── Service duration for the requested service ────────────────────────────
-    slot_minutes = 60
+    slot_minutes = _DEFAULT_SLOT_MINUTES
     service_id_str = args.get("service_id")
     if service_id_str:
         try:
@@ -365,45 +578,21 @@ async def _check_availability(
 
     # Grid step: configurable granularity or falls back to service duration
     try:
-        granularity_minutes = int(schedule.get("slot_granularity_minutes", slot_minutes))
+        granularity_minutes = int(sched["schedule"].get("slot_granularity_minutes", slot_minutes))
     except (TypeError, ValueError):
         granularity_minutes = slot_minutes
     granularity_dur = timedelta(minutes=granularity_minutes)
 
-    # ── Booked appointments for the target day ────────────────────────────────
-    day_open = datetime.combine(target_date, open_t, tzinfo=tz)
-    day_close = datetime.combine(target_date, close_t, tzinfo=tz)
+    # ── Booked windows for the target day ─────────────────────────────────────
+    day_open = datetime.combine(target_date, sched["open_t"], tzinfo=tz)
+    day_close = datetime.combine(target_date, sched["close_t"], tzinfo=tz)
+    lunch_range = sched["lunch_range"]
 
-    result = await db.execute(
-        select(Appointment).where(
-            Appointment.tenant_id == tenant_id,
-            Appointment.scheduled_at >= day_open,
-            Appointment.scheduled_at < day_close,
-            Appointment.status != AppointmentStatus.CANCELLED,
-        )
-    )
-    booked = result.scalars().all()
-
-    # Batch-fetch service durations for booked appointments (avoids N+1)
-    booked_service_ids = {a.service_id for a in booked if a.service_id}
-    service_durations: dict[uuid.UUID, int] = {}
-    if booked_service_ids:
-        svcs = await db.execute(select(Service).where(Service.id.in_(booked_service_ids)))
-        service_durations = {s.id: s.duration_minutes for s in svcs.scalars().all()}
-
-    # Build real (start, end) windows in clinic timezone
-    booked_ranges: list[tuple[datetime, datetime]] = []
-    for appt in booked:
-        start = appt.scheduled_at.astimezone(tz)
-        if appt.ends_at:
-            end = appt.ends_at.astimezone(tz)
-        elif appt.service_id and appt.service_id in service_durations:
-            end = start + timedelta(minutes=service_durations[appt.service_id])
-        else:
-            end = start + timedelta(minutes=60)  # conservative fallback
-        booked_ranges.append((start, end))
+    booked_ranges = await _booked_windows(db, tenant_id, tz, day_open, day_close)
 
     # ── Generate available slots ──────────────────────────────────────────────
+    # A slot is free while fewer than `capacity` appointments overlap it
+    # (capacity ≈ professionals/rooms working in parallel; default 1).
     available: list[str] = []
     cursor = day_open
 
@@ -415,8 +604,8 @@ async def _check_availability(
             cursor += granularity_dur
             continue
 
-        # Reject if the slot window overlaps any booked appointment
-        if any(cursor < end and slot_end > start for start, end in booked_ranges):
+        overlaps = sum(1 for start, end in booked_ranges if cursor < end and slot_end > start)
+        if overlaps >= capacity:
             cursor += granularity_dur
             continue
 
@@ -430,24 +619,28 @@ async def _check_availability(
             "message": "Não há horários disponíveis nesta data.",
         }
 
-    return {"date": args["date"], "available_slots": available, "timezone": tz_name}
+    return {"date": args["date"], "available_slots": available, "timezone": tz.key}
 
 
 async def _create_appointment(
     db: AsyncSession,
     tenant_id: uuid.UUID,
     contact_id: uuid.UUID,
+    tenant_settings: dict,
     args: dict,
 ) -> dict:
     try:
         scheduled_at = datetime.fromisoformat(args["scheduled_at"])
-        # Ensure timezone-aware
-        if scheduled_at.tzinfo is None:
-            scheduled_at = scheduled_at.replace(tzinfo=timezone.utc)
     except (KeyError, ValueError):
         return {"error": "Formato de data/hora inválido. Use ISO 8601."}
+    # A naive datetime from the AI means clinic-local time (that's how
+    # check_availability reported the slots) — not UTC.
+    if scheduled_at.tzinfo is None:
+        scheduled_at = scheduled_at.replace(tzinfo=_clinic_tz(tenant_settings))
 
+    # Resolve & validate service, capturing its duration for ends_at
     service_id: uuid.UUID | None = None
+    duration_minutes = _DEFAULT_SLOT_MINUTES
     service_id_str = args.get("service_id")
     if service_id_str:
         try:
@@ -458,16 +651,28 @@ async def _create_appointment(
                     Service.id == candidate, Service.tenant_id == tenant_id
                 )
             )
-            if svc_result.scalar_one_or_none():
+            svc = svc_result.scalar_one_or_none()
+            if svc:
                 service_id = candidate
+                duration_minutes = svc.duration_minutes
         except ValueError:
             pass  # invalid UUID — ignore silently
+
+    ends_at = scheduled_at + timedelta(minutes=duration_minutes)
+
+    # Serialize concurrent bookings for this tenant, then validate the slot is
+    # still bookable (business hours + working day + lunch + capacity) before insert.
+    await _lock_tenant(db, tenant_id)
+    error = await _validate_booking(db, tenant_id, tenant_settings, scheduled_at, ends_at)
+    if error:
+        return {"error": error}
 
     appointment = Appointment(
         tenant_id=tenant_id,   # context — IA cannot override
         contact_id=contact_id,  # context — IA cannot override
         service_id=service_id,
         scheduled_at=scheduled_at,
+        ends_at=ends_at,
         status=AppointmentStatus.SCHEDULED,
         notes=args.get("notes"),
     )
@@ -486,6 +691,7 @@ async def _create_appointment(
         "success": True,
         "appointment_id": str(appointment.id),
         "scheduled_at": scheduled_at.isoformat(),
+        "ends_at": ends_at.isoformat(),
         "status": AppointmentStatus.SCHEDULED,
     }
 
@@ -569,12 +775,14 @@ async def _reschedule_appointment(
     db: AsyncSession,
     tenant_id: uuid.UUID,
     contact_id: uuid.UUID,
+    tenant_settings: dict,
     args: dict,
 ) -> dict:
     """
     Atomic reschedule: change scheduled_at (and optionally service) of an existing
     appointment. Tenant + contact scope enforced from context — AI cannot reschedule
-    other patients' appointments.
+    other patients' appointments. Revalidates the new slot (hours + capacity),
+    excluding the appointment itself from the overlap count.
     """
     try:
         appointment_id = uuid.UUID(args["appointment_id"])
@@ -583,10 +791,14 @@ async def _reschedule_appointment(
 
     try:
         new_scheduled_at = datetime.fromisoformat(args["new_scheduled_at"])
-        if new_scheduled_at.tzinfo is None:
-            new_scheduled_at = new_scheduled_at.replace(tzinfo=timezone.utc)
     except (KeyError, ValueError):
         return {"error": "Formato de new_scheduled_at inválido. Use ISO 8601."}
+    # Naive datetime from the AI means clinic-local time — not UTC.
+    if new_scheduled_at.tzinfo is None:
+        new_scheduled_at = new_scheduled_at.replace(tzinfo=_clinic_tz(tenant_settings))
+
+    # Serialize bookings for this tenant before reading + writing.
+    await _lock_tenant(db, tenant_id)
 
     result = await db.execute(
         select(Appointment).where(
@@ -600,6 +812,8 @@ async def _reschedule_appointment(
     if appointment is None:
         return {"error": "Agendamento não encontrado ou já cancelado."}
 
+    # Determine the effective service (new one if provided + valid, else current)
+    target_service_id = appointment.service_id
     new_service_id_str = args.get("new_service_id")
     if new_service_id_str:
         try:
@@ -609,24 +823,33 @@ async def _reschedule_appointment(
                     Service.id == candidate, Service.tenant_id == tenant_id
                 )
             )
-            svc = svc_result.scalar_one_or_none()
-            if svc:
-                appointment.service_id = candidate
-                # Recompute ends_at when service (and thus duration) changes
-                appointment.ends_at = new_scheduled_at + timedelta(minutes=svc.duration_minutes)
+            if svc_result.scalar_one_or_none():
+                target_service_id = candidate
         except ValueError:
             pass  # invalid UUID — silently ignore (keep old service)
 
+    # Resolve duration for the effective service to compute ends_at
+    duration_minutes = _DEFAULT_SLOT_MINUTES
+    if target_service_id:
+        svc = (
+            await db.execute(select(Service).where(Service.id == target_service_id))
+        ).scalar_one_or_none()
+        if svc:
+            duration_minutes = svc.duration_minutes
+
+    new_ends_at = new_scheduled_at + timedelta(minutes=duration_minutes)
+
+    # Validate the new slot, excluding this appointment from the overlap count.
+    error = await _validate_booking(
+        db, tenant_id, tenant_settings, new_scheduled_at, new_ends_at,
+        exclude_id=appointment_id,
+    )
+    if error:
+        return {"error": error}
+
+    appointment.service_id = target_service_id
     appointment.scheduled_at = new_scheduled_at
-    # If we didn't recompute ends_at via service change, recompute from existing service
-    if appointment.ends_at is None or new_service_id_str is None:
-        if appointment.service_id:
-            svc_result = await db.execute(
-                select(Service).where(Service.id == appointment.service_id)
-            )
-            svc = svc_result.scalar_one_or_none()
-            if svc:
-                appointment.ends_at = new_scheduled_at + timedelta(minutes=svc.duration_minutes)
+    appointment.ends_at = new_ends_at
 
     await db.flush()
 
@@ -746,3 +969,463 @@ async def _update_contact_info(
         "rejected": rejected,
         "message": "Cadastro atualizado.",
     }
+
+
+# ---------------------------------------------------------------------------
+# Per-professional scheduling (Fase 3 — scheduling_mode="per_professional")
+# ---------------------------------------------------------------------------
+
+async def _resolve_service(
+    db: AsyncSession, tenant_id: uuid.UUID, service_id_str: str | None
+) -> Service | None:
+    if not service_id_str:
+        return None
+    try:
+        sid = uuid.UUID(service_id_str)
+    except (ValueError, AttributeError):
+        return None
+    return (
+        await db.execute(
+            select(Service).where(Service.id == sid, Service.tenant_id == tenant_id)
+        )
+    ).scalar_one_or_none()
+
+
+async def _professionals_for_service(
+    db: AsyncSession, tenant_id: uuid.UUID, service_id: uuid.UUID
+) -> list[User]:
+    """Active users (professionals) linked to a service, ordered by name."""
+    rows = await db.execute(
+        select(User)
+        .join(professional_services, professional_services.c.professional_id == User.id)
+        .where(
+            professional_services.c.service_id == service_id,
+            User.tenant_id == tenant_id,
+            User.is_active == True,  # noqa: E712
+        )
+        .order_by(User.full_name)
+    )
+    return list(rows.scalars().all())
+
+
+async def _professional_offers(
+    db: AsyncSession, professional_id: uuid.UUID, service_id: uuid.UUID | None
+) -> bool:
+    if service_id is None:
+        return True
+    row = await db.execute(
+        select(professional_services.c.service_id).where(
+            professional_services.c.professional_id == professional_id,
+            professional_services.c.service_id == service_id,
+        )
+    )
+    return row.first() is not None
+
+
+def _clinic_fallback_blocks(
+    tenant_settings: dict, target_date: date, tz: ZoneInfo
+) -> list[tuple[datetime, datetime]]:
+    """Clinic-wide work blocks for a date (open→close minus lunch), used when a
+    professional hasn't defined their own hours."""
+    sched = _resolve_schedule(tenant_settings, target_date)
+    if target_date.isoweekday() not in sched["working_days"]:
+        return []
+    open_dt = datetime.combine(target_date, sched["open_t"], tzinfo=tz)
+    close_dt = datetime.combine(target_date, sched["close_t"], tzinfo=tz)
+    lunch = sched["lunch_range"]
+    if lunch and lunch[0] < close_dt and lunch[1] > open_dt:
+        blocks: list[tuple[datetime, datetime]] = []
+        if open_dt < lunch[0]:
+            blocks.append((open_dt, min(lunch[0], close_dt)))
+        if close_dt > lunch[1]:
+            blocks.append((max(lunch[1], open_dt), close_dt))
+        return blocks
+    return [(open_dt, close_dt)]
+
+
+async def _professional_work_blocks(
+    db: AsyncSession,
+    professional_id: uuid.UUID,
+    tenant_settings: dict,
+    target_date: date,
+    tz: ZoneInfo,
+) -> list[tuple[datetime, datetime]]:
+    """
+    Work blocks for a professional on a date. Uses their own work_hours when they
+    have any defined (an empty result for that weekday means they don't work that
+    day); falls back to the clinic schedule only when they have NO hours at all.
+    """
+    rows = (
+        await db.execute(
+            select(ProfessionalWorkHours).where(
+                ProfessionalWorkHours.professional_id == professional_id
+            )
+        )
+    ).scalars().all()
+    if rows:
+        wd = target_date.isoweekday()
+        return [
+            (
+                datetime.combine(target_date, w.start_time, tzinfo=tz),
+                datetime.combine(target_date, w.end_time, tzinfo=tz),
+            )
+            for w in rows
+            if w.weekday == wd
+        ]
+    return _clinic_fallback_blocks(tenant_settings, target_date, tz)
+
+
+def _slots_in_blocks(
+    blocks: list[tuple[datetime, datetime]],
+    booked: list[tuple[datetime, datetime]],
+    slot_dur: timedelta,
+    granularity: timedelta,
+) -> list[datetime]:
+    slots: list[datetime] = []
+    for bstart, bend in blocks:
+        cursor = bstart
+        while cursor + slot_dur <= bend:
+            slot_end = cursor + slot_dur
+            if not any(cursor < e and slot_end > s for s, e in booked):
+                slots.append(cursor)
+            cursor += granularity
+    return slots
+
+
+async def _professional_slot_ok(
+    db: AsyncSession,
+    tenant_id: uuid.UUID,
+    tenant_settings: dict,
+    professional_id: uuid.UUID,
+    start: datetime,
+    end: datetime,
+    tz: ZoneInfo,
+    exclude_id: uuid.UUID | None = None,
+) -> bool:
+    """True if [start, end) fits within one of the professional's work blocks and
+    doesn't overlap any of their other appointments."""
+    local_start = start.astimezone(tz)
+    local_end = end.astimezone(tz)
+    blocks = await _professional_work_blocks(
+        db, professional_id, tenant_settings, local_start.date(), tz
+    )
+    if not any(bs <= local_start and local_end <= be for bs, be in blocks):
+        return False
+    booked = await _booked_windows(
+        db, tenant_id, tz, local_start, local_end,
+        exclude_id=exclude_id, professional_id=professional_id,
+    )
+    return len(booked) == 0
+
+
+def _granularity(tenant_settings: dict, default_minutes: int) -> timedelta:
+    schedule = (tenant_settings or {}).get("schedule", {}) or {}
+    try:
+        minutes = int(schedule.get("slot_granularity_minutes", default_minutes))
+    except (TypeError, ValueError):
+        minutes = default_minutes
+    return timedelta(minutes=max(minutes, 5))
+
+
+async def _check_availability_pp(
+    db: AsyncSession,
+    tenant_id: uuid.UUID,
+    tenant_settings: dict,
+    args: dict,
+) -> dict:
+    """Per-professional availability: a time is offered if at least one qualified
+    professional is free; the response lists who is free at each time."""
+    try:
+        target_date = date.fromisoformat(args["date"])
+    except (KeyError, ValueError):
+        return {"error": "Formato de data inválido. Use YYYY-MM-DD."}
+
+    service = await _resolve_service(db, tenant_id, args.get("service_id"))
+    if service is None:
+        return {"error": "Preciso saber o serviço para verificar a disponibilidade. Use list_services primeiro."}
+
+    tz = _clinic_tz(tenant_settings)
+    slot_dur = timedelta(minutes=service.duration_minutes)
+    granularity = _granularity(tenant_settings, service.duration_minutes)
+
+    professionals = await _professionals_for_service(db, tenant_id, service.id)
+    requested = args.get("professional_id")
+    if requested:
+        professionals = [p for p in professionals if str(p.id) == str(requested)]
+        if not professionals:
+            return {"error": "Esse profissional não realiza este serviço."}
+    if not professionals:
+        return {
+            "date": args["date"],
+            "available_slots": [],
+            "message": "Nenhum profissional realiza este serviço ainda.",
+        }
+
+    day_start = datetime.combine(target_date, time.min, tzinfo=tz)
+    day_end = day_start + timedelta(days=1)
+
+    agg: dict[str, list[dict]] = {}
+    for prof in professionals:
+        blocks = await _professional_work_blocks(db, prof.id, tenant_settings, target_date, tz)
+        if not blocks:
+            continue
+        booked = await _booked_windows(
+            db, tenant_id, tz, day_start, day_end, professional_id=prof.id
+        )
+        for slot in _slots_in_blocks(blocks, booked, slot_dur, granularity):
+            agg.setdefault(slot.strftime("%H:%M"), []).append(
+                {"id": str(prof.id), "name": prof.full_name}
+            )
+
+    if not agg:
+        return {
+            "date": args["date"],
+            "available_slots": [],
+            "message": "Não há horários disponíveis nesta data.",
+        }
+
+    times = sorted(agg.keys())
+    return {
+        "date": args["date"],
+        "service_id": str(service.id),
+        "timezone": tz.key,
+        "available_slots": times,
+        "slots": [{"time": t, "professionals": agg[t]} for t in times],
+    }
+
+
+async def _create_appointment_pp(
+    db: AsyncSession,
+    tenant_id: uuid.UUID,
+    contact_id: uuid.UUID,
+    tenant_settings: dict,
+    args: dict,
+) -> dict:
+    try:
+        scheduled_at = datetime.fromisoformat(args["scheduled_at"])
+    except (KeyError, ValueError):
+        return {"error": "Formato de data/hora inválido. Use ISO 8601."}
+    tz = _clinic_tz(tenant_settings)
+    if scheduled_at.tzinfo is None:
+        scheduled_at = scheduled_at.replace(tzinfo=tz)
+
+    service = await _resolve_service(db, tenant_id, args.get("service_id"))
+    if service is None:
+        return {"error": "Preciso saber qual serviço será agendado. Use list_services primeiro."}
+
+    ends_at = scheduled_at + timedelta(minutes=service.duration_minutes)
+
+    professionals = await _professionals_for_service(db, tenant_id, service.id)
+    if not professionals:
+        return {"error": "Nenhum profissional realiza este serviço ainda."}
+
+    await _lock_tenant(db, tenant_id)
+
+    requested = args.get("professional_id")
+    if requested:
+        candidates = [p for p in professionals if str(p.id) == str(requested)]
+        if not candidates:
+            return {"error": "Esse profissional não realiza este serviço."}
+    else:
+        candidates = professionals
+
+    free = [
+        p for p in candidates
+        if await _professional_slot_ok(db, tenant_id, tenant_settings, p.id, scheduled_at, ends_at, tz)
+    ]
+    if not free:
+        return {"error": "Nenhum profissional disponível nesse horário. Use check_availability para ver horários livres."}
+    if len(free) > 1 and not requested:
+        return {
+            "needs_selection": True,
+            "professionals": [{"id": str(p.id), "name": p.full_name} for p in free],
+            "message": "Há mais de um profissional disponível nesse horário. Pergunte ao paciente qual prefere e chame create_appointment de novo com professional_id.",
+        }
+
+    chosen = free[0]
+    appointment = Appointment(
+        tenant_id=tenant_id,
+        contact_id=contact_id,
+        service_id=service.id,
+        professional_id=chosen.id,
+        scheduled_at=scheduled_at,
+        ends_at=ends_at,
+        status=AppointmentStatus.SCHEDULED,
+        notes=args.get("notes"),
+    )
+    try:
+        async with db.begin_nested():
+            db.add(appointment)
+            await db.flush()
+    except IntegrityError as exc:
+        if "no_overlap_per_professional" in str(getattr(exc, "orig", exc)):
+            # EXCLUDE constraint caught a concurrent booking for this professional
+            return {"error": "Esse horário acabou de ser preenchido para o profissional. Escolha outro horário."}
+        logger.exception("create_appointment_pp_integrity_error", extra={"tenant_id": str(tenant_id)})
+        return {"error": "Não consegui concluir o agendamento. Tente novamente ou escolha outro horário."}
+
+    logger.info(
+        "Appointment(pp) created by AI tool: id=%s tenant=%s contact=%s prof=%s at=%s",
+        appointment.id, tenant_id, contact_id, chosen.id, scheduled_at,
+    )
+
+    return {
+        "success": True,
+        "appointment_id": str(appointment.id),
+        "scheduled_at": scheduled_at.isoformat(),
+        "ends_at": ends_at.isoformat(),
+        "professional_id": str(chosen.id),
+        "professional_name": chosen.full_name,
+        "status": AppointmentStatus.SCHEDULED,
+    }
+
+
+async def _reschedule_appointment_pp(
+    db: AsyncSession,
+    tenant_id: uuid.UUID,
+    contact_id: uuid.UUID,
+    tenant_settings: dict,
+    args: dict,
+) -> dict:
+    try:
+        appointment_id = uuid.UUID(args["appointment_id"])
+    except (KeyError, ValueError):
+        return {"error": "appointment_id inválido."}
+
+    try:
+        new_scheduled_at = datetime.fromisoformat(args["new_scheduled_at"])
+    except (KeyError, ValueError):
+        return {"error": "Formato de new_scheduled_at inválido. Use ISO 8601."}
+    tz = _clinic_tz(tenant_settings)
+    if new_scheduled_at.tzinfo is None:
+        new_scheduled_at = new_scheduled_at.replace(tzinfo=tz)
+
+    await _lock_tenant(db, tenant_id)
+
+    appointment = (
+        await db.execute(
+            select(Appointment).where(
+                Appointment.id == appointment_id,
+                Appointment.tenant_id == tenant_id,
+                Appointment.contact_id == contact_id,
+                Appointment.status != AppointmentStatus.CANCELLED,
+            )
+        )
+    ).scalar_one_or_none()
+    if appointment is None:
+        return {"error": "Agendamento não encontrado ou já cancelado."}
+
+    # Effective service (new if provided + valid, else current)
+    target_service_id = appointment.service_id
+    new_service = await _resolve_service(db, tenant_id, args.get("new_service_id"))
+    if new_service is not None:
+        target_service_id = new_service.id
+
+    duration_minutes = _DEFAULT_SLOT_MINUTES
+    if target_service_id:
+        svc = (
+            await db.execute(select(Service).where(Service.id == target_service_id))
+        ).scalar_one_or_none()
+        if svc:
+            duration_minutes = svc.duration_minutes
+    new_ends_at = new_scheduled_at + timedelta(minutes=duration_minutes)
+
+    # Effective professional
+    target_prof_id = appointment.professional_id
+    new_prof_str = args.get("new_professional_id")
+    if new_prof_str:
+        try:
+            candidate = uuid.UUID(new_prof_str)
+        except ValueError:
+            return {"error": "new_professional_id inválido."}
+        if not await _professional_offers(db, candidate, target_service_id):
+            return {"error": "Esse profissional não realiza este serviço."}
+        target_prof_id = candidate
+
+    if target_prof_id is None:
+        # No professional yet — resolve from the service's professionals
+        professionals = (
+            await _professionals_for_service(db, tenant_id, target_service_id)
+            if target_service_id else []
+        )
+        free = [
+            p for p in professionals
+            if await _professional_slot_ok(
+                db, tenant_id, tenant_settings, p.id, new_scheduled_at, new_ends_at, tz,
+                exclude_id=appointment_id,
+            )
+        ]
+        if not free:
+            return {"error": "Nenhum profissional disponível nesse horário. Use check_availability."}
+        if len(free) > 1:
+            return {
+                "needs_selection": True,
+                "professionals": [{"id": str(p.id), "name": p.full_name} for p in free],
+                "message": "Há mais de um profissional disponível. Pergunte qual o paciente prefere e chame de novo com new_professional_id.",
+            }
+        target_prof_id = free[0].id
+    else:
+        if not await _professional_offers(db, target_prof_id, target_service_id):
+            return {"error": "O profissional do agendamento não realiza esse serviço. Informe new_professional_id."}
+        if not await _professional_slot_ok(
+            db, tenant_id, tenant_settings, target_prof_id, new_scheduled_at, new_ends_at, tz,
+            exclude_id=appointment_id,
+        ):
+            return {"error": "O profissional não está disponível nesse horário. Escolha outro horário ou profissional."}
+
+    appointment.service_id = target_service_id
+    appointment.professional_id = target_prof_id
+    appointment.scheduled_at = new_scheduled_at
+    appointment.ends_at = new_ends_at
+    try:
+        async with db.begin_nested():
+            await db.flush()
+    except IntegrityError as exc:
+        if "no_overlap_per_professional" in str(getattr(exc, "orig", exc)):
+            return {"error": "Esse horário acabou de ser preenchido para o profissional. Escolha outro horário."}
+        logger.exception("reschedule_appointment_pp_integrity_error", extra={"tenant_id": str(tenant_id)})
+        return {"error": "Não consegui remarcar. Tente novamente ou escolha outro horário."}
+
+    logger.info(
+        "Appointment(pp) rescheduled by AI tool: id=%s tenant=%s prof=%s new_at=%s",
+        appointment.id, tenant_id, target_prof_id, new_scheduled_at,
+    )
+
+    return {
+        "success": True,
+        "appointment_id": str(appointment.id),
+        "scheduled_at": appointment.scheduled_at.isoformat(),
+        "service_id": str(appointment.service_id) if appointment.service_id else None,
+        "professional_id": str(target_prof_id),
+        "message": "Agendamento remarcado com sucesso.",
+    }
+
+
+async def _list_professionals(db: AsyncSession, tenant_id: uuid.UUID, args: dict) -> dict:
+    """List active professionals and the services each one performs."""
+    users = (
+        await db.execute(
+            select(User)
+            .where(User.tenant_id == tenant_id, User.is_active == True)  # noqa: E712
+            .options(selectinload(User.offered_services))
+            .order_by(User.full_name)
+        )
+    ).scalars().all()
+
+    service_filter = args.get("service_id")
+    result = []
+    for u in users:
+        services = [s for s in u.offered_services if s.is_active]
+        if not services:
+            continue  # skip non-attending staff (receptionists, etc.)
+        if service_filter and not any(str(s.id) == str(service_filter) for s in services):
+            continue
+        result.append({
+            "id": str(u.id),
+            "name": u.full_name,
+            "services": [{"id": str(s.id), "name": s.name} for s in services],
+        })
+
+    if not result:
+        return {"professionals": [], "message": "Nenhum profissional disponível para este critério."}
+    return {"professionals": result}

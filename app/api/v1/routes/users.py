@@ -16,13 +16,24 @@ from typing import Annotated
 
 from fastapi import APIRouter, Depends, Query, status
 from sqlalchemy import func, select
+from sqlalchemy.orm import selectinload
 
 from app.api.deps import CurrentTenantId, CurrentUser, DBSession
 from app.core.errors import ConflictError, ForbiddenError, NotFoundError
 from app.core.security import hash_password
+from app.models.professional import ProfessionalWorkHours
+from app.models.service import Service
 from app.models.user import User, UserRole
 from app.schemas.pagination import Page, PageMeta, PaginationParams, pagination_params
-from app.schemas.user import UserCreate, UserRead, UserUpdate
+from app.schemas.user import (
+    ServiceAssignmentUpdate,
+    UserCreate,
+    UserDetailRead,
+    UserRead,
+    UserUpdate,
+    WorkHourBlock,
+    WorkHoursUpdate,
+)
 from app.services.tokens import revoke_all_user_tokens
 
 router = APIRouter(prefix="/users", tags=["Users"])
@@ -89,14 +100,15 @@ async def list_users(
     )
 
 
-@router.get("/{user_id}", response_model=UserRead)
+@router.get("/{user_id}", response_model=UserDetailRead)
 async def get_user(
     user_id: uuid.UUID,
     db: DBSession,
     tenant_id: CurrentTenantId,
     _: CurrentUser,
 ):
-    return await _get_or_404(db, user_id, tenant_id)
+    user = await _get_detail_or_404(db, user_id, tenant_id)
+    return _to_detail(user)
 
 
 @router.patch("/{user_id}", response_model=UserRead)
@@ -146,6 +158,73 @@ async def update_user(
     return target
 
 
+@router.put("/{user_id}/services", response_model=UserDetailRead)
+async def set_user_services(
+    user_id: uuid.UUID,
+    payload: ServiceAssignmentUpdate,
+    db: DBSession,
+    tenant_id: CurrentTenantId,
+    current_user: CurrentUser,
+):
+    """Replace the full set of services this professional offers (OWNER / ADMIN)."""
+    if current_user.role not in _MANAGE_ROLES:
+        raise ForbiddenError("Insufficient permissions.")
+
+    user = await _get_detail_or_404(db, user_id, tenant_id)
+
+    services: list[Service] = []
+    if payload.service_ids:
+        unique_ids = set(payload.service_ids)
+        rows = await db.execute(
+            select(Service).where(
+                Service.id.in_(unique_ids), Service.tenant_id == tenant_id
+            )
+        )
+        services = list(rows.scalars().all())
+        missing = unique_ids - {s.id for s in services}
+        if missing:
+            raise NotFoundError(
+                "Serviço(s) não encontrado(s): " + ", ".join(str(m) for m in missing)
+            )
+
+    user.offered_services = services
+    await db.commit()
+
+    user = await _get_detail_or_404(db, user_id, tenant_id)
+    return _to_detail(user)
+
+
+@router.put("/{user_id}/work-hours", response_model=UserDetailRead)
+async def set_user_work_hours(
+    user_id: uuid.UUID,
+    payload: WorkHoursUpdate,
+    db: DBSession,
+    tenant_id: CurrentTenantId,
+    current_user: CurrentUser,
+):
+    """Replace the full set of weekly work blocks for this professional (OWNER / ADMIN)."""
+    if current_user.role not in _MANAGE_ROLES:
+        raise ForbiddenError("Insufficient permissions.")
+
+    user = await _get_detail_or_404(db, user_id, tenant_id)
+
+    # cascade="all, delete-orphan" removes the previous blocks on reassignment
+    user.work_hours = [
+        ProfessionalWorkHours(
+            tenant_id=tenant_id,
+            professional_id=user.id,
+            weekday=b.weekday,
+            start_time=b.start_time,
+            end_time=b.end_time,
+        )
+        for b in payload.blocks
+    ]
+    await db.commit()
+
+    user = await _get_detail_or_404(db, user_id, tenant_id)
+    return _to_detail(user)
+
+
 # ── Helpers ─────────────────────────────────────────────────────────────────
 
 async def _get_or_404(db, user_id: uuid.UUID, tenant_id: uuid.UUID) -> User:
@@ -156,3 +235,34 @@ async def _get_or_404(db, user_id: uuid.UUID, tenant_id: uuid.UUID) -> User:
     if user is None:
         raise NotFoundError("User not found.")
     return user
+
+
+async def _get_detail_or_404(db, user_id: uuid.UUID, tenant_id: uuid.UUID) -> User:
+    """Load a user with its offered services + work hours eagerly (async-safe)."""
+    result = await db.execute(
+        select(User)
+        .where(User.id == user_id, User.tenant_id == tenant_id)
+        .options(selectinload(User.offered_services), selectinload(User.work_hours))
+    )
+    user = result.scalar_one_or_none()
+    if user is None:
+        raise NotFoundError("User not found.")
+    return user
+
+
+def _to_detail(user: User) -> UserDetailRead:
+    return UserDetailRead(
+        id=user.id,
+        tenant_id=user.tenant_id,
+        full_name=user.full_name,
+        email=user.email,
+        role=user.role,
+        is_active=user.is_active,
+        created_at=user.created_at,
+        updated_at=user.updated_at,
+        service_ids=[s.id for s in user.offered_services],
+        work_hours=[
+            WorkHourBlock(weekday=w.weekday, start_time=w.start_time, end_time=w.end_time)
+            for w in sorted(user.work_hours, key=lambda x: (x.weekday, x.start_time))
+        ],
+    )

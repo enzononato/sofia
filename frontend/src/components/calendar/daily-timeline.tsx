@@ -130,19 +130,19 @@ export function DailyTimeline({ date, appointments, contacts, services, isLoadin
             )}
 
             {enrichedAppointments.map((appt) => {
-              const isCancelled = appt.status === "CANCELLED";
+              const isCancelled = appt.status === "cancelled";
 
               let accentColor = "border-l-blue-500";
               let bgColor = "bg-blue-500/10 hover:bg-blue-500/15";
               let badgeColor = "bg-blue-500/20 text-blue-400";
               let statusLabel = "Agendado";
 
-              if (appt.status === "CONFIRMED") {
+              if (appt.status === "confirmed") {
                 accentColor = "border-l-emerald-500";
                 bgColor = "bg-emerald-500/10 hover:bg-emerald-500/15";
                 badgeColor = "bg-emerald-500/20 text-emerald-400";
                 statusLabel = "Confirmado";
-              } else if (appt.status === "COMPLETED") {
+              } else if (appt.status === "completed") {
                 accentColor = "border-l-slate-400";
                 bgColor = "bg-slate-500/10 hover:bg-slate-500/15";
                 badgeColor = "bg-slate-500/20 text-slate-400";
@@ -152,7 +152,7 @@ export function DailyTimeline({ date, appointments, contacts, services, isLoadin
                 bgColor = "bg-red-500/8 hover:bg-red-500/12";
                 badgeColor = "bg-red-500/20 text-red-400";
                 statusLabel = "Cancelado";
-              } else if (appt.status === "NO_SHOW") {
+              } else if (appt.status === "no_show") {
                 accentColor = "border-l-amber-500";
                 bgColor = "bg-amber-500/10 hover:bg-amber-500/15";
                 badgeColor = "bg-amber-500/20 text-amber-400";

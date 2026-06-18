@@ -8,14 +8,15 @@ PATCH  /appointments/{id}      — update status / notes / schedule
 """
 
 import uuid
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, Query, status
 from sqlalchemy import func, select
+from sqlalchemy.exc import IntegrityError
 
 from app.api.deps import CurrentTenantId, CurrentUser, DBSession
-from app.core.errors import ForbiddenError, NotFoundError, UnprocessableEntityError
+from app.core.errors import ConflictError, ForbiddenError, NotFoundError, UnprocessableEntityError
 from app.models.appointment import Appointment, AppointmentStatus
 from app.models.contact import Contact
 from app.models.service import Service
@@ -51,12 +52,28 @@ async def create_appointment(
     if payload.professional_id:
         await _assert_user_belongs_to_tenant(db, payload.professional_id, tenant_id)
 
+    data = payload.model_dump()
+    # Always populate ends_at so availability checks and the per-professional
+    # overlap constraint cover manually-created appointments too.
+    if data.get("ends_at") is None:
+        duration = await _service_duration(db, data.get("service_id"))
+        data["ends_at"] = data["scheduled_at"] + timedelta(minutes=duration)
+
     appointment = Appointment(
         tenant_id=tenant_id,  # always from middleware, never from payload
-        **payload.model_dump(),
+        **data,
     )
     db.add(appointment)
-    await db.commit()
+    try:
+        await db.commit()
+    except IntegrityError as exc:
+        await db.rollback()
+        if "no_overlap_per_professional" in str(getattr(exc, "orig", exc)):
+            raise ConflictError(
+                "Já existe um agendamento para este profissional nesse horário.",
+                code="appointment_overlap",
+            )
+        raise
     await db.refresh(appointment)
     return appointment
 
@@ -143,12 +160,38 @@ async def update_appointment(
     for field, value in update_data.items():
         setattr(appointment, field, value)
 
-    await db.commit()
+    # Recompute ends_at when the time or service changed but ends_at wasn't given
+    # explicitly — keeps the appointment window (and overlap guard) consistent.
+    if ("scheduled_at" in update_data or "service_id" in update_data) and "ends_at" not in update_data:
+        duration = await _service_duration(db, appointment.service_id)
+        appointment.ends_at = appointment.scheduled_at + timedelta(minutes=duration)
+
+    try:
+        await db.commit()
+    except IntegrityError as exc:
+        await db.rollback()
+        if "no_overlap_per_professional" in str(getattr(exc, "orig", exc)):
+            raise ConflictError(
+                "Já existe um agendamento para este profissional nesse horário.",
+                code="appointment_overlap",
+            )
+        raise
     await db.refresh(appointment)
     return appointment
 
 
 # ── Helpers ─────────────────────────────────────────────────────────────────
+
+_DEFAULT_DURATION_MINUTES = 60
+
+
+async def _service_duration(db, service_id: uuid.UUID | None) -> int:
+    """Duration of a service in minutes, or a 60-min default when absent/unknown."""
+    if not service_id:
+        return _DEFAULT_DURATION_MINUTES
+    svc = await db.get(Service, service_id)
+    return svc.duration_minutes if svc else _DEFAULT_DURATION_MINUTES
+
 
 async def _get_or_404(db, appointment_id: uuid.UUID, tenant_id: uuid.UUID) -> Appointment:
     result = await db.execute(

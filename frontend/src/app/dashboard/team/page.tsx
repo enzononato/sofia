@@ -13,9 +13,13 @@ import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, D
 import { Badge } from "@/components/ui/badge";
 import { Avatar, AvatarFallback } from "@/components/ui/avatar";
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
-import { Search, Plus, Loader2, Shield, User as UserIcon, Mail, Settings2, KeyRound } from "lucide-react";
+import { Search, Plus, Loader2, Shield, User as UserIcon, Mail, Settings2, KeyRound, CalendarClock } from "lucide-react";
 import { format } from "date-fns";
 import { ptBR } from "date-fns/locale";
+import { ProfessionalConfigDialog } from "@/components/team/professional-config-dialog";
+
+// Roles that attend patients → can have services + work hours configured
+const ATTENDING_ROLES: UserRole[] = ["professional", "owner"];
 
 const ROLE_LABELS: Record<UserRole, string> = {
   owner: "Proprietário",
@@ -53,6 +57,7 @@ export default function TeamPage() {
   const [search, setSearch] = useState("");
   const [isModalOpen, setIsModalOpen] = useState(false);
   const [editingUser, setEditingUser] = useState<User | null>(null);
+  const [configUser, setConfigUser] = useState<User | null>(null);
   const [generatePassword, setGeneratePassword] = useState(false);
 
   const { register, handleSubmit, reset, watch, setValue, formState: { errors } } = useForm<FormValues>({
@@ -237,28 +242,50 @@ export default function TeamPage() {
                         }
                       </td>
                       <td className="px-4 py-3 text-right">
-                        <TooltipProvider>
-                          <Tooltip>
-                            <TooltipTrigger>
-                              <div>
-                                <Button 
-                                  variant="ghost" 
-                                  size="sm" 
-                                  onClick={() => openEditModal(user)}
-                                  disabled={!canEdit}
-                                  className="h-8 px-2"
-                                >
-                                  <Settings2 className="h-4 w-4" />
-                                </Button>
-                              </div>
-                            </TooltipTrigger>
-                            {!canEdit && (
-                              <TooltipContent>
-                                Apenas Proprietários podem editar este usuário.
-                              </TooltipContent>
-                            )}
-                          </Tooltip>
-                        </TooltipProvider>
+                        <div className="flex items-center justify-end gap-1">
+                          {ATTENDING_ROLES.includes(user.role) && (
+                            <TooltipProvider>
+                              <Tooltip>
+                                <TooltipTrigger>
+                                  <div>
+                                    <Button
+                                      variant="ghost"
+                                      size="sm"
+                                      onClick={() => setConfigUser(user)}
+                                      disabled={!canEdit}
+                                      className="h-8 px-2"
+                                    >
+                                      <CalendarClock className="h-4 w-4" />
+                                    </Button>
+                                  </div>
+                                </TooltipTrigger>
+                                <TooltipContent>Serviços e horários de atendimento</TooltipContent>
+                              </Tooltip>
+                            </TooltipProvider>
+                          )}
+                          <TooltipProvider>
+                            <Tooltip>
+                              <TooltipTrigger>
+                                <div>
+                                  <Button
+                                    variant="ghost"
+                                    size="sm"
+                                    onClick={() => openEditModal(user)}
+                                    disabled={!canEdit}
+                                    className="h-8 px-2"
+                                  >
+                                    <Settings2 className="h-4 w-4" />
+                                  </Button>
+                                </div>
+                              </TooltipTrigger>
+                              {!canEdit && (
+                                <TooltipContent>
+                                  Apenas Proprietários podem editar este usuário.
+                                </TooltipContent>
+                              )}
+                            </Tooltip>
+                          </TooltipProvider>
+                        </div>
                       </td>
                     </tr>
                   );
@@ -268,6 +295,12 @@ export default function TeamPage() {
           </div>
         </div>
       )}
+
+      <ProfessionalConfigDialog
+        user={configUser}
+        open={!!configUser}
+        onOpenChange={(o) => { if (!o) setConfigUser(null); }}
+      />
 
       <Dialog open={isModalOpen} onOpenChange={setIsModalOpen}>
         <DialogContent className="sm:max-w-[425px]">

@@ -63,20 +63,23 @@ export function AiTab({ tenant }: { tenant: TenantProfile }) {
   const onSubmit = async (data: FormValues) => {
     try {
       setIsSuccess(false);
+      // Send explicit values (empty string clears) so the backend top-level merge
+      // overwrites these keys instead of keeping stale ones. Unmanaged keys like
+      // `scheduling_mode` are preserved by the merge.
       await updateTenant({
         ai_config: {
           model: data.model,
-          gemini_api_key: data.gemini_api_key || undefined,
+          gemini_api_key: data.gemini_api_key || "",
           system_prompt: data.system_prompt,
           temperature: data.temperature,
           max_output_tokens: data.max_output_tokens,
           multimodal_enabled: data.multimodal_enabled,
-          prompt_first_contact: data.prompt_first_contact || undefined,
-          prompt_imminent_appointment: data.prompt_imminent_appointment || undefined,
-          prompt_post_appointment: data.prompt_post_appointment || undefined,
-          prompt_active_patient: data.prompt_active_patient || undefined,
-          prompt_returning_lead: data.prompt_returning_lead || undefined,
-          prompt_reactivation: data.prompt_reactivation || undefined,
+          prompt_first_contact: data.prompt_first_contact || "",
+          prompt_imminent_appointment: data.prompt_imminent_appointment || "",
+          prompt_post_appointment: data.prompt_post_appointment || "",
+          prompt_active_patient: data.prompt_active_patient || "",
+          prompt_returning_lead: data.prompt_returning_lead || "",
+          prompt_reactivation: data.prompt_reactivation || "",
         }
       });
       setIsSuccess(true);

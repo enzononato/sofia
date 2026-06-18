@@ -310,6 +310,22 @@ async def _process_inbound_message(tenant: Tenant, data: dict, request_id: str |
         # ── Phase 1: persist inbound immediately ─────────────────────────────
         async with AsyncSessionLocal() as db:
             try:
+                # Idempotency: Evolution may re-deliver the same event. Skip if we
+                # already stored this WhatsApp message id for this tenant.
+                if whatsapp_msg_id:
+                    dup = await db.scalar(
+                        select(Message.id).where(
+                            Message.tenant_id == tenant.id,
+                            Message.whatsapp_message_id == whatsapp_msg_id,
+                        )
+                    )
+                    if dup is not None:
+                        logger.info(
+                            "webhook_duplicate_skipped",
+                            extra={**log_ctx, "phone": phone, "whatsapp_message_id": whatsapp_msg_id},
+                        )
+                        return
+
                 contact = await _find_or_create_contact(db, tenant, phone, push_name, data=data)
                 ai_paused = contact.ai_paused
 

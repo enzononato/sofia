@@ -1,5 +1,5 @@
 # PROJECT STATE — Clinic SaaS Multi-tenant
-> Handover técnico gerado em 2026-04-28. Última atualização: 2026-05-06 (sessão 7 — Sofia 2.0: multimodal + stages + tools novas).
+> Handover técnico gerado em 2026-04-28. Última atualização: 2026-06-17 (Agenda multi-profissional Fases 1–3 + rodada de correções — ver §12. Alembic head: `e3f4a5b6c7d8`).
 
 ---
 
@@ -150,6 +150,7 @@ O frontend Axios intercepta `401` automaticamente, tenta `POST /auth/refresh` co
   "max_output_tokens": 1024,
   "gemini_api_key": "<chave-por-tenant-opcional>",
   "multimodal_enabled": false,
+  "scheduling_mode": "capacity",
   "prompt_first_contact": "<override opcional>",
   "prompt_imminent_appointment": "<override opcional>",
   "prompt_post_appointment": "<override opcional>",
@@ -160,6 +161,8 @@ O frontend Axios intercepta `401` automaticamente, tenta `POST /auth/refresh` co
 ```
 
 > `multimodal_enabled` (default `false`) liga o processamento de áudio (até 1m30s), imagem, vídeo e documento via Gemini multimodal. Se desligado, Sofia responde com mensagem polida pedindo texto.
+>
+> `scheduling_mode` (default `"capacity"`) escolhe entre agenda por capacidade da clínica ou **por profissional** (`"per_professional"`). Ver §12.
 >
 > Os 6 `prompt_*` são overlays aplicados no topo do `system_prompt` conforme o estágio detectado da conversa (ver §7.4). Se omitidos, usam defaults em [app/services/ai_stages.py](app/services/ai_stages.py).
 
@@ -178,7 +181,8 @@ O frontend Axios intercepta `401` automaticamente, tenta `POST /auth/refresh` co
     "close_time": "18:00",
     "lunch_start": "12:00",
     "lunch_end": "13:00",
-    "slot_granularity_minutes": 30
+    "slot_granularity_minutes": 30,
+    "capacity": 1
   },
   "clinic": {
     "address": "Rua X, 123 - Bairro - Cidade/UF",
@@ -190,6 +194,8 @@ O frontend Axios intercepta `401` automaticamente, tenta `POST /auth/refresh` co
   }
 }
 ```
+
+> `settings.schedule.capacity` (default `1`) = nº de atendimentos simultâneos que a clínica suporta (≈ profissionais/salas). Usado por `check_availability` e pela validação anti-dupla-marcação (§12).
 
 > `settings.clinic` é exposto pela tool `get_clinic_info` para que Sofia responda perguntas sobre endereço, telefone, valores e formas de pagamento sem precisar de prompt customizado.
 
@@ -251,7 +257,7 @@ Frontend faz polling em GET /tenants/me/whatsapp/status → detecta "connected" 
 | Método | Rota | Role mínima | Descrição |
 |---|---|---|---|
 | GET | `/tenants/me` | Qualquer autenticado | Dados da clínica atual |
-| PATCH | `/tenants/me` | OWNER / ADMIN | Atualiza nome, `ai_config`, `settings` |
+| PATCH | `/tenants/me` | OWNER / ADMIN | Atualiza nome, `ai_config`, `settings`. `ai_config`/`settings` são **merge** top-level (não substituem o JSONB inteiro) |
 
 ### WhatsApp Connection
 | Método | Rota | Role mínima | Descrição |
@@ -291,8 +297,10 @@ Frontend faz polling em GET /tenants/me/whatsapp/status → detecta "connected" 
 |---|---|---|---|
 | POST | `/users` | OWNER / ADMIN | Cria funcionário |
 | GET | `/users` | Qualquer | Lista equipe |
-| GET | `/users/{id}` | Qualquer | Detalhe |
+| GET | `/users/{id}` | Qualquer | Detalhe (inclui `service_ids` + `work_hours`) |
 | PATCH | `/users/{id}` | OWNER / ADMIN | Atualiza |
+| PUT | `/users/{id}/services` | OWNER / ADMIN | Define os serviços que o profissional realiza (Fase 2) |
+| PUT | `/users/{id}/work-hours` | OWNER / ADMIN | Define os blocos de horário de trabalho do profissional (Fase 2) |
 
 ### Webhooks (público)
 | Método | Rota | Descrição |
@@ -326,18 +334,23 @@ AsyncSessionLocal() as db:
 wa_service.send_text_message(instance_name, phone, reply_text)
 ```
 
-### 7.2 As 8 Ferramentas (`app/services/ai_tools.py`)
+### 7.2 As 9 Ferramentas (`app/services/ai_tools.py`)
+
+> O agendamento tem 2 modos via `ai_config.scheduling_mode` (§12): **`capacity`** (default — N atendimentos em paralelo por clínica) e **`per_professional`** (agenda por profissional). As tools de agenda têm caminho duplo conforme o modo.
 
 | Tool | Parâmetros | O que faz |
 |---|---|---|
-| `list_services` | nenhum | `SELECT * FROM services WHERE tenant_id=? AND is_active=true` |
-| `check_availability` | `date` (YYYY-MM-DD), `service_id?` | Slots livres respeitando `tenant.settings.schedule` |
-| `create_appointment` | `scheduled_at` (ISO 8601), `service_id?`, `notes?` | Insere `Appointment`. `tenant_id` e `contact_id` fixos do contexto |
+| `list_services` | nenhum | Serviços ativos do tenant. Em `per_professional`, só os que têm ≥1 profissional vinculado |
+| `check_availability` | `date`, `service_id?`, `professional_id?` | `capacity`: slots livres respeitando `schedule` enquanto `sobreposições < capacity`. `per_professional`: slots por profissional (horário próprio/fallback) — retorna quem está livre em cada horário |
+| `create_appointment` | `scheduled_at`, `service_id?`, `professional_id?`, `notes?` | Insere `Appointment` (`tenant_id`/`contact_id` do contexto). Valida slot + advisory lock + sempre grava `ends_at`; naive = fuso da clínica. `per_professional`: exige serviço, atribui/pergunta profissional, constraint de overlap no banco |
 | `get_upcoming_appointments` | nenhum | Próximos agendamentos do contato atual |
-| `cancel_appointment` | `appointment_id` (UUID), `reason?` | Cancela agendamento. Valida `tenant_id` e `contact_id` |
-| `reschedule_appointment` | `appointment_id`, `new_scheduled_at`, `new_service_id?` | Atomic reschedule (evita cancela+cria). Recalcula `ends_at` se trocar serviço |
-| `get_clinic_info` | nenhum | Devolve `tenant.settings.clinic` + horário. Para perguntas sobre endereço, valores, formas de pagamento |
-| `update_contact_info` | `full_name?`, `email?`, `date_of_birth?`, `address?` | Whitelist de campos cadastrais que Sofia pode atualizar. **Nunca** edita `phone`, `status`, `ai_paused` |
+| `cancel_appointment` | `appointment_id`, `reason?` | Cancela agendamento. Valida `tenant_id` e `contact_id` |
+| `reschedule_appointment` | `appointment_id`, `new_scheduled_at`, `new_service_id?`, `new_professional_id?` | Atomic reschedule. Revalida o novo slot (excluindo o próprio do overlap); `per_professional` valida o profissional |
+| `get_clinic_info` | nenhum | Devolve `tenant.settings.clinic` + horário. Endereço, valores, formas de pagamento |
+| `update_contact_info` | `full_name?`, `email?`, `date_of_birth?`, `address?` | Whitelist de campos cadastrais. **Nunca** edita `phone`, `status`, `ai_paused` |
+| `list_professionals` | `service_id?` | Profissionais ativos e os serviços que cada um realiza (para a Sofia apresentar/escolher) |
+
+> O nome da clínica (`tenant.name`) é injetado no `system_prompt` em todas as conversas.
 
 ### 7.3 Segurança — Prevenção de IDOR / Prompt Injection
 
@@ -401,8 +414,8 @@ Restrições:
 | `/dashboard/inbox` | ✅ | Inbox WhatsApp-style (lista de contatos + chat window + handoff manual) |
 | `/dashboard/calendar` | ✅ | Agenda diária com timeline 07h–19h, now indicator, cards por status |
 | `/dashboard/settings` | ✅ | 4 abas: Perfil, WhatsApp (QR code connect), IA (prompt/modelo), Horários |
-| `/dashboard/services` | 🔲 | CRUD de procedimentos |
-| `/dashboard/team` | 🔲 | CRUD de equipe |
+| `/dashboard/services` | ✅ | CRUD de procedimentos (grid de cards, toggle ativo). Hooks em `useCalendar.ts` |
+| `/dashboard/team` | ✅ | CRUD de equipe (tabela + modal, roles, ativo/inativo) + **dialog de atendimento por profissional: serviços que faz + horários de trabalho** (Fase 2 — §12). Hooks em `useTeam.ts` |
 
 ### 8.2 Arquitetura Frontend
 
@@ -603,393 +616,93 @@ para MVP. Migrar para tempo real quando passar de ~50 usuários simultâneos.
 (ex: typing indicators, marcação de leitura). Caso contrário SSE é mais simples.
 
 Por que não pular direto para SSE/WebSocket: introduz estado em conexões longas,
-complica deploy multi-worker (precisa Redis), e o ganho de UX vs polling de 5s
-| Camada | Tecnologia |
-|---|---|
-| API | Python 3.13, FastAPI 0.115, Uvicorn |
-| ORM / DB | SQLAlchemy 2.0 (async), asyncpg, PostgreSQL 16 |
-| Migrations | Alembic 1.14 |
-| Validação | Pydantic v2, pydantic-settings |
-| Auth | JWT (python-jose), bcrypt 3.2.2 + passlib 1.7.4 |
-| IA | Google Gemini (`google-genai 1.10`), Function Calling |
-| WhatsApp | Evolution API (self-hosted, webhooks) |
-| HTTP client | httpx 0.28 |
-| Infra local | Docker Compose (postgres:16-alpine + pgAdmin) |
-
-**Dependências críticas de versão:**
-- `bcrypt==3.2.2` — fixado porque passlib 1.7.4 é incompatível com bcrypt ≥ 4.0
-- `httpx==0.28.1` — google-genai 1.10 exige `>=0.28.1`
+complica deploy multi-worker (precisa Redis), e o ganho de UX vs polling de 5s nao justifica a complexidade enquanto o volume for baixo.
 
 ---
 
-## 3. Arquitetura Multi-tenant
+## 12. Agenda multi-profissional & anti-dupla-marcacao
 
-### 3.1 Isolamento no Banco — `TenantScopedMixin`
+> Decisao de produto (sessao 2026-06-17): a clinica atende **varios profissionais em paralelo**. A agenda evolui de "global por tenant" para "por profissional". Implementacao faseada.
 
+### Fase 1 - Concluida (trava de dupla marcacao)
+Arquivo: [app/services/ai_tools.py](app/services/ai_tools.py)
+
+- **`settings.schedule.capacity`** (novo, default `1`): numero de atendimentos simultaneos que a clinica suporta (aprox. profissionais/salas). Ponte ate a atribuicao real de profissional (Fase 3). Com `capacity=1` o comportamento e identico ao anterior.
+- **`check_availability`** agora conta sobreposicoes e libera o slot enquanto `n. de agendamentos sobrepostos < capacity`.
+- **`create_appointment` / `reschedule_appointment`** passaram a:
+  1. Adquirir **advisory lock por tenant** (`pg_advisory_xact_lock`) - serializa reservas concorrentes e fecha a race entre checar->gravar.
+  2. **Revalidar** o horario antes de gravar: dia util, dentro do expediente, fora do almoco e `overlaps < capacity`. Em caso de falha devolvem `{"error": ...}` e a Sofia explica ao paciente.
+  3. **Sempre preencher `ends_at`** (antes nascia `NULL`).
+- **Fuso horario**: horario ISO *naive* vindo da IA agora e interpretado como **fuso da clinica** (antes assumia UTC - bug para clinicas fora de UTC).
+
+Helpers compartilhados em `ai_tools.py`: `_resolve_schedule`, `_booked_windows`, `_validate_booking`, `_lock_tenant`, `_clinic_tz`. Sem migration: `ends_at`/`professional_id` ja existiam no schema; `capacity` vive no JSONB `settings`.
+
+> ~~**Limitacao conhecida (Fase 1):** o endpoint manual `POST /appointments` ainda nao passa por essa validacao.~~ **Resolvido** (rodada de correcoes 2026-06-17): o create/update manual agora preenche `ends_at` e a constraint `no_overlap_per_professional` recusa overlap (→ `409 appointment_overlap`).
+
+### Decisões de produto (2026-06-17) que guiam as Fases 2 e 3
+1. **Escolha do profissional:** Sofia pergunta **só se houver vários** disponíveis; se só um faz o serviço, atribui direto.
+2. **Horário de trabalho:** **próprio por profissional** (cada um tem seus dias/blocos); a clínica é fallback quando o profissional não definir.
+3. **Serviço sem profissional vinculado:** **não é oferecido** pela Sofia até ter ao menos um profissional ativo vinculado.
+4. **Profissional = `User` com `role=professional`** (reaproveita a entidade e a página de Equipe). Owners/admins que atendem também podem ser vinculados.
+
+### Fase 2 — Modelo de dados + configuração no sistema ✅ Concluída (2026-06-17)
+> Objetivo: a clínica cadastrar **quem faz o quê e quando**, tudo pela UI. Sem isso a Fase 3 não tem dados.
+
+**Banco** (migration `c1d2e3f4a5b6`):
+- `professional_services` (M:N): `professional_id` → users, `service_id` → services; PK (`professional_id`,`service_id`); índice por `service_id`; ON DELETE CASCADE. **`tenant_id` omitido de propósito** (ambos os lados já são tenant-scoped; a API valida que profissional + serviço são do mesmo tenant antes de vincular).
+- `professional_work_hours`: `id`, `tenant_id`, `professional_id`, `weekday` (ISO 1–7), `start_time`, `end_time` + timestamps. **Múltiplos blocos/dia** (turnos divididos → o intervalo entre blocos é o almoço). CHECK: `weekday∈[1,7]`, `end_time>start_time`. Sem linhas = herda `settings.schedule` da clínica.
+- Models: [app/models/professional.py](app/models/professional.py); relações `User.offered_services`/`User.work_hours` e `Service.professionals`.
+- (Exceções/folgas/feriados ficam para o backlog "bloqueio de agenda".)
+
+**API** (tenant-scoped, OWNER/ADMIN) — [app/api/v1/routes/users.py](app/api/v1/routes/users.py):
+- `GET /users/{id}` agora retorna `UserDetailRead` (inclui `service_ids` + `work_hours`).
+- `PUT /users/{id}/services` body `{service_ids: [...]}` — substitui o conjunto; valida que todos os serviços são do tenant.
+- `PUT /users/{id}/work-hours` body `{blocks: [{weekday,start_time,end_time}]}` — substitui os blocos; valida ordem e sobreposição (Pydantic).
+
+**Frontend** — [team/page.tsx](frontend/src/app/dashboard/team/page.tsx) + [professional-config-dialog.tsx](frontend/src/components/team/professional-config-dialog.tsx):
+- Ação "Serviços e horários" (ícone relógio) nas linhas de `professional`/`owner` abre dialog com multiseleção de serviços + editor de blocos por dia. Hooks novos em [useTeam.ts](frontend/src/hooks/useTeam.ts): `useUserDetail`, `useSetUserServices`, `useSetUserWorkHours`.
+
+### Fase 3 — Sofia usa a equipe ✅ Concluída (2026-06-17)
+**Flag de rollout:** `ai_config.scheduling_mode` = `"capacity"` (default, Fase 1) | `"per_professional"` (Fase 3). Ligar por tenant **depois** que a clínica vinculou serviços e definiu horários — senão a Sofia para de oferecer serviços sem profissional. Threaded via `execute_tool(..., ai_config=...)` em [ai.py](app/services/ai.py).
+
+**Tools** ([ai_tools.py](app/services/ai_tools.py)) — em modo `per_professional`:
+- `list_services` retorna **apenas** serviços com ≥1 profissional ativo vinculado (decisão 3).
+- `check_availability(date, service_id, professional_id?)`: resolve os profissionais do serviço; por profissional calcula os blocos do dia (horário próprio, ou fallback da clínica só se ele não tiver **nenhum** horário definido) menos seus agendamentos; retorna `slots: [{time, professionals:[{id,name}]}]` + `available_slots`.
+- `create_appointment(scheduled_at, service_id, professional_id?, notes?)`: exige serviço; valida que o profissional o realiza; sem `professional_id` e com **um** livre → atribui; com **vários** → `{needs_selection, professionals}` para a Sofia perguntar (decisão 1); grava `professional_id` + `ends_at`. Insert em `begin_nested`; `IntegrityError` da constraint → "horário acabou de ser preenchido".
+- `reschedule_appointment(..., new_professional_id?)`: mesma validação por profissional (exclui o próprio do overlap).
+- Nova tool `list_professionals(service_id?)` — profissionais ativos + serviços que cada um faz.
+- **Nome da clínica** (`tenant.name`) injetado no `system_prompt` ([ai.py](app/services/ai.py)).
+
+**Banco** (migration `d2e3f4a5b6c7`): `btree_gist` + constraint anti-overlap **por profissional**:
+```sql
+EXCLUDE USING gist (professional_id WITH =, tstzrange(scheduled_at, ends_at) WITH &&)
+  WHERE (status <> 'cancelled' AND professional_id IS NOT NULL AND ends_at IS NOT NULL)
 ```
-app/models/base.py
-```
-
-Toda tabela de negócio (User, Contact, Service, Appointment, Message) herda de `TenantScopedMixin`, que impõe:
-- `tenant_id: UUID NOT NULL INDEX FK → tenants(id) ON DELETE CASCADE`
-
-Nenhuma query de negócio deve ser executada sem `WHERE tenant_id = ?`. O campo está no nível do modelo, não da aplicação, então um ORM mal-configurado ainda teria o campo disponível para filtrar.
-
-### 3.2 Resolução de Tenant — `TenantMiddleware`
-
-```
-app/middleware/tenant.py → class TenantMiddleware
-```
-
-Executa em **toda requisição não-pública**. Três estratégias (configurável via `.env`):
-
-| Estratégia | Fonte | Lookup |
-|---|---|---|
-| `header` (padrão) | `X-Tenant-ID` header | UUID ou slug |
-| `subdomain` | `Host` header (ex: `clinica.saas.com`) | slug |
-| `jwt` | Claim `tenant_id` no Bearer token | UUID |
-
-Resultado armazenado em `request.state.tenant_id` e `request.state.tenant`.
-
-**Paths públicos** (bypassam o middleware):
-```python
-_PUBLIC_PATHS = {"/", "/docs", "/redoc", "/openapi.json", "/health", "/favicon.ico", "/api/v1/auth/signup"}
-_PUBLIC_PREFIXES = ("/api/v1/webhooks/",)  # webhook resolve tenant internamente pelo slug da URL
-```
-
-Respostas de erro:
-- `401` — tenant não identificado ou não encontrado
-- `403` — tenant encontrado mas `is_active = False`
-
-### 3.3 Isolamento nas Dependências FastAPI
-
-```
-app/api/deps.py
-```
-
-```python
-CurrentTenantId = Annotated[uuid.UUID, Depends(get_current_tenant_id)]
-CurrentUser     = Annotated[User,      Depends(get_current_user)]
-DBSession       = Annotated[AsyncSession, Depends(get_db)]
-```
-
-`get_current_user` valida que:
-1. JWT é válido e não expirado
-2. `token.tenant_id == request.state.tenant_id` — token de uma clínica não funciona em outra
-3. Usuário existe e `is_active = True` no banco
-
-### 3.4 JWT
-
-```
-app/core/security.py → create_access_token / decode_access_token
-```
-
-Payload do JWT:
-```json
-{ "sub": "<user_id>", "tenant_id": "<tenant_id>", "role": "owner", "email": "...", "exp": ... }
-```
-
-Expiração padrão: 24h (`ACCESS_TOKEN_EXPIRE_MINUTES=1440`).
-
----
-
-## 4. Modelos de Banco
-
-### Tabelas
-
-| Tabela | Herda | Propósito |
-|---|---|---|
-| `tenants` | `TimestampMixin` | Clínica: nome, slug (único), plano, `ai_config` JSONB, `settings` JSONB |
-| `users` | `TenantScopedMixin` | Funcionários/donos. Roles: owner/admin/receptionist/professional/viewer |
-| `contacts` | `TenantScopedMixin` | Pacientes/leads. `status`: lead/active/inactive/blocked |
-| `services` | `TenantScopedMixin` | Procedimentos: nome, `duration_minutes`, `price` |
-| `appointments` | `TenantScopedMixin` | Agendamentos. FK → contacts, services (nullable), users (professional, nullable) |
-| `messages` | `TenantScopedMixin` | Histórico de mensagens WhatsApp. `direction`: inbound/outbound |
-
-### Campos JSONB importantes em `tenants`
-
-**`ai_config`** — configuração da IA por clínica:
-```json
-{
-  "model": "gemini-2.0-flash",
-  "system_prompt": "Você é Sofia, secretária da Clínica X...",
-  "temperature": 0.7,
-  "max_output_tokens": 1024,
-  "gemini_api_key": "<chave-por-tenant-opcional>"
-}
-```
-
-**`settings`** — configuração operacional por clínica:
-```json
-{
-  "whatsapp": {
-    "provider": "evolution",
-    "api_url": "https://evolution.clinica.com.br",
-    "api_key": "SUA_KEY",
-    "instance": "nome-da-instancia",
-    "webhook_secret": "token-validacao"
-  },
-  "schedule": {
-    "timezone": "America/Sao_Paulo",
-    "working_days": [1, 2, 3, 4, 5],
-    "open_time": "08:00",
-    "close_time": "18:00",
-    "lunch_start": "12:00",
-    "lunch_end": "13:00",
-    "slot_granularity_minutes": 30
-  }
-}
-```
-
-`schedule` — todos os campos são opcionais. Defaults: UTC, Seg–Sex, 08h–18h, sem almoço, granularidade = duração do serviço.
-- `working_days`: ISO weekday (1=Segunda … 7=Domingo)
-- `slot_granularity_minutes`: espaçamento da grade de horários (ex: 30 → slots às 08:00, 08:30, 09:00…). Se omitido, usa a duração do serviço solicitado.
-
----
-
-## 5. Endpoints da API
-
-### Auth (público / semi-público)
-| Método | Rota | Auth | Descrição |
-|---|---|---|---|
-| POST | `/auth/signup` | Nenhuma | Cria Tenant + User(OWNER) atomicamente, retorna JWT |
-| POST | `/auth/login` | Middleware (tenant) | Valida email+senha no tenant resolvido, retorna JWT |
-
-### Tenants (protegido)
-| Método | Rota | Role mínima | Descrição |
-|---|---|---|---|
-| GET | `/tenants/me` | Qualquer autenticado | Dados da clínica atual |
-| PATCH | `/tenants/me` | OWNER / ADMIN | Atualiza nome, `ai_config`, `settings` |
-
-### Services (protegido)
-| Método | Rota | Role mínima | Descrição |
-|---|---|---|---|
-| POST | `/services` | OWNER / ADMIN | Cria serviço (`tenant_id` injetado pelo backend) |
-| GET | `/services` | Qualquer | Lista serviços ativos do tenant |
-| GET | `/services/{id}` | Qualquer | Detalhe de serviço |
-| PATCH | `/services/{id}` | OWNER / ADMIN | Atualiza serviço |
-
-### Appointments (protegido)
-| Método | Rota | Role mínima | Descrição |
-|---|---|---|---|
-| POST | `/appointments` | OWNER / ADMIN / RECEPTIONIST | Cria agendamento com validação cruzada de FKs |
-| GET | `/appointments` | Qualquer | Lista com filtros: `status`, `contact_id`, `professional_id`, `date_from`, `date_to`, `limit`, `offset` |
-| GET | `/appointments/{id}` | Qualquer | Detalhe |
-| PATCH | `/appointments/{id}` | OWNER / ADMIN / RECEPTIONIST | Atualiza; `cancellation_reason` obrigatório ao cancelar |
-
-### Webhooks (público — tenant resolvido internamente)
-| Método | Rota | Descrição |
-|---|---|---|
-| POST | `/webhooks/whatsapp/{tenant_slug}` | Entrada da Evolution API. Valida `X-Webhook-Secret`, processa em background task |
-
-### Contacts (protegido)
-| Método | Rota | Role mínima | Descrição |
-|---|---|---|---|
-| GET | `/contacts` | Qualquer | Lista contatos com preview da última mensagem. Filtros: `status`, `search` (nome/telefone), `limit`, `offset` |
-| GET | `/contacts/{id}` | Qualquer | Detalhe do contato |
-| GET | `/contacts/{id}/messages` | Qualquer | Histórico de mensagens do contato (mais recente primeiro) |
-| PATCH | `/contacts/{id}` | OWNER / ADMIN / RECEPTIONIST | Atualiza dados e status do contato |
-
-### Users / Staff (protegido)
-| Método | Rota | Role mínima | Descrição |
-|---|---|---|---|
-| POST | `/users` | OWNER / ADMIN | Cria funcionário; só OWNER pode criar outro OWNER |
-| GET | `/users` | Qualquer | Lista equipe ativa (ou com `?include_inactive=true`) |
-| GET | `/users/{id}` | Qualquer | Detalhe do funcionário |
-| PATCH | `/users/{id}` | OWNER / ADMIN | Atualiza dados, role ou senha. ADMIN não pode editar OWNERs |
-
-### Modelos sem rotas
-- `Message` — gravado automaticamente pelo webhook; leitura via `GET /contacts/{id}/messages`
-
----
-
-## 6. O Cérebro da Sofia — Function Calling
-
-### 6.1 Fluxo Geral
-
-```
-Webhook recebe mensagem WhatsApp
-          │
-          ▼ (background task, sessão única)
-AsyncSessionLocal() as db:
-  ├─ _find_or_create_contact(db, tenant, phone, push_name)
-  ├─ Salva Message(INBOUND) → db.flush()
-  ├─ _fetch_history(db, tenant_id, contact_id, limit=AI_HISTORY_LIMIT)
-  │
-  ├─ ai_service.generate_reply(tenant, contact, text, history, db)
-  │    └─ Loop até 5 iterações:
-  │         Gemini → function_call? → execute_tool(db) → FunctionResponse → Gemini
-  │         Gemini → texto puro → retorna (reply_text, model_name)
-  │
-  ├─ Salva Message(OUTBOUND)
-  └─ db.commit()  ← commit único: contact + inbound + appointments (se criados) + outbound
-          │
-          ▼ (fora da sessão, após commit)
-wa_service.send_text_message(tenant.settings, phone, reply_text)
-```
-
-### 6.2 Loop de Function Calling (`app/services/ai.py`)
-
-```python
-MAX_TOOL_ITERATIONS = 5
-
-for iteration in range(MAX_TOOL_ITERATIONS):
-    response = await client.aio.models.generate_content(model, contents, config)
-    function_call_part = next((p for p in response.candidates[0].content.parts
-                               if p.function_call is not None), None)
-    if function_call_part is None:
-        return response.text, model          # ← saída normal
-
-    tool_result = await execute_tool(fn.name, dict(fn.args), db, tenant.id, contact.id)
-    contents.append(response_content)        # turno do modelo
-    contents.append(Content(role="user",     # turno com resultado da tool
-        parts=[Part(function_response=FunctionResponse(fn.name, tool_result))]))
-
-return "Desculpe, não consegui...", model    # ← fallback se esgotou iterações
-```
-
-### 6.3 As 5 Ferramentas (`app/services/ai_tools.py`)
-
-| Tool | Parâmetros | O que faz |
-|---|---|---|
-| `list_services` | nenhum | `SELECT * FROM services WHERE tenant_id=? AND is_active=true` |
-| `check_availability` | `date` (YYYY-MM-DD), `service_id?` | Slots livres respeitando `tenant.settings.schedule`: fuso, dias úteis, horário, almoço e granularidade. Detecção de conflito por janela real (start→end) com batch lookup de duração dos serviços agendados |
-| `create_appointment` | `scheduled_at` (ISO 8601), `service_id?`, `notes?` | Insere `Appointment`. `tenant_id` e `contact_id` fixos do contexto — **jamais dos args** |
-| `get_upcoming_appointments` | nenhum | Próximos agendamentos do contato atual (`scheduled_at >= now()`) |
-| `cancel_appointment` | `appointment_id` (UUID), `reason?` | Cancela agendamento do contato atual. Valida `tenant_id` e `contact_id` — IA não pode cancelar agendamentos de outros pacientes |
-
-### 6.4 Segurança Crítica — Prevenção de IDOR / Prompt Injection
-
-> **O backend nunca aceita `tenant_id` ou `contact_id` vindos dos argumentos da IA.**
-
-Em `execute_tool()` e em cada handler de tool, esses valores são sempre lidos do contexto Python (`tenant_id` e `contact_id` passados como parâmetros da função), nunca de `args`. Se um prompt malicioso instruir a IA a passar `contact_id` de outro paciente, o parâmetro `args` simplymente não contém esse campo nas declarações — e mesmo que viesse em `args`, o executor ignora e usa o `contact_id` do contexto.
-
-Adicionalmente, em `_create_appointment`:
-```python
-# service_id vinda da IA é validada com AND tenant_id = ? antes de ser aceita
-svc_result = await db.execute(
-    select(Service).where(Service.id == candidate, Service.tenant_id == tenant_id)
-)
-```
-
----
-
-## 7. Configuração do Ambiente
-
-### `.env` (variáveis obrigatórias para rodar)
-
-```env
-SECRET_KEY=<32+ chars aleatórios>
-DATABASE_URL=postgresql+asyncpg://postgres:postgres@localhost:5432/clinic_saas
-GEMINI_API_KEY=AIza...
-TENANT_RESOLUTION_STRATEGY=header   # header | subdomain | jwt
-```
-
-### Subir infra e aplicação
-
-```bash
-docker compose up -d                  # PostgreSQL 16 + pgAdmin (localhost:5050)
-python -m venv venv && venv\Scripts\activate
-pip install -r requirements.txt
-alembic upgrade head                  # cria todas as tabelas
-uvicorn app.main:app --reload         # API em localhost:8000
-```
-
-### Testar signup inicial
-
-```bash
-curl -X POST http://localhost:8000/api/v1/auth/signup \
-  -H "Content-Type: application/json" \
-  -d '{"clinic_name":"Clínica X","clinic_slug":"clinica-x","clinic_email":"contato@x.com",
-       "owner_name":"Dr. João","owner_email":"joao@x.com","password":"senha1234"}'
-```
-
----
-
-## 8. Estrutura de Pastas
-
-```
-AI Agent SaaS/
-├── app/
-│   ├── main.py              # Factory do FastAPI, registro de middlewares
-│   ├── config.py            # Settings (pydantic-settings, lê .env)
-│   ├── database.py          # Engine async, AsyncSessionLocal, Base
-│   ├── models/
-│   │   ├── base.py          # TimestampMixin, TenantScopedMixin
-│   │   ├── tenant.py        # Tenant, TenantPlan enum
-│   │   ├── user.py          # User, UserRole enum
-│   │   ├── contact.py       # Contact, ContactStatus enum
-│   │   ├── service.py       # Service
-│   │   ├── appointment.py   # Appointment, AppointmentStatus enum
-│   │   └── message.py       # Message, MessageDirection, MessageChannel
-│   ├── schemas/             # Pydantic v2 (Create/Update/Read por entidade)
-│   ├── api/
-│   │   ├── deps.py          # DBSession, CurrentTenantId, CurrentUser
-│   │   └── v1/
-│   │       ├── router.py    # Registro central dos sub-routers
-│   │       └── routes/
-│   │           ├── auth.py          # signup, login
-│   │           ├── tenants.py       # GET/PATCH /tenants/me
-│   │           ├── services.py      # CRUD serviços
-│   │           ├── appointments.py  # CRUD agendamentos
-│   │           └── webhooks.py      # POST /webhooks/whatsapp/{slug}
-│   ├── core/
-│   │   └── security.py      # hash_password, verify_password, create/decode JWT
-│   ├── middleware/
-│   │   └── tenant.py        # TenantMiddleware (3 estratégias)
-│   └── services/
-│       ├── ai.py            # generate_reply() — loop de function calling
-│       ├── ai_tools.py      # CLINIC_TOOLS declarations + execute_tool()
-│       └── whatsapp.py      # send_text_message() — cliente Evolution API
-├── alembic/
-│   ├── env.py               # Config async do Alembic
-│   └── versions/            # Migrations geradas
-├── docker/
-│   └── pgadmin-servers.json # Servidor pré-configurado no pgAdmin
-├── docker-compose.yml       # PostgreSQL 16 + pgAdmin
-├── alembic.ini
-├── requirements.txt
-└── .env.example
-```
-
----
-
-## 9. Próximos Passos (Backlog Priorizado)
-
-### ✅ Concluído
-- **Contacts API** — `GET /contacts`, `GET /contacts/{id}`, `GET /contacts/{id}/messages`, `PATCH /contacts/{id}`
-- **Users/Staff API** — `POST /users`, `GET /users`, `GET /users/{id}`, `PATCH /users/{id}`
-- **Tool `cancel_appointment`** — Sofia pode criar e cancelar agendamentos
-- **Frontend UI** — Configuração da IA (Sofia 2.0 multimodal e estágios), CRUD de Serviços e CRUD de Equipe concluídos.
-
-### 🔲 Pendente
-
-| Prioridade | Feature | Notas |
-|---|---|---|
-| 1 | **Frontend Dashboard** | Next.js — inbox de conversas, calendário de agendamentos, config da IA |
-| 2 | **Refresh Token** | JWT de 24h é curto para prod; adicionar refresh token |
-| 3 | **Rate limiting** | Por tenant — evitar abuso no endpoint de webhook |
-| 4 | **Criptografia de `ai_config`** | `gemini_api_key` por tenant deve ser criptografado at rest |
-
-### 8. Estrutura de Pastas (atualizada)
-
-```
-app/api/v1/routes/
-    ├── auth.py          # signup, login
-    ├── tenants.py       # GET/PATCH /tenants/me
-    ├── services.py      # CRUD serviços
-    ├── appointments.py  # CRUD agendamentos
-    ├── contacts.py      # CRUD contatos + GET histórico de mensagens  ← NOVO
-    ├── users.py         # CRUD equipe / staff                         ← NOVO
-    └── webhooks.py      # POST /webhooks/whatsapp/{slug}
-
-app/services/
-    ├── ai.py            # generate_reply() — loop de function calling
-    ├── ai_tools.py      # 5 tools: list_services, check_availability,
-    │                    #          create_appointment, get_upcoming_appointments,
-    │                    #          cancel_appointment                  ← NOVO
-    └── whatsapp.py      # send_text_message()
-
-app/schemas/
-    └── contact.py       # ContactReadWithLastMessage adicionado        ← NOVO
-```
+À prova de race no nível do banco; agendamentos `capacity` (sem `professional_id`) não são afetados.
+
+**Helpers novos** em ai_tools: `_resolve_service`, `_professionals_for_service`, `_professional_offers`, `_clinic_fallback_blocks`, `_professional_work_blocks`, `_slots_in_blocks`, `_professional_slot_ok`, `_granularity`.
+
+**Dependência:** adicionado `tzdata` ao [requirements.txt](requirements.txt) — `zoneinfo` falha sem ele no Windows / containers mínimos (afetava `check_availability` desde a Fase 1).
+
+> Em `per_professional`, o `capacity` da Fase 1 deixa de ser usado para reservas (legado; remover quando todos os tenants migrarem).
+>
+> **Validado** com smoke test E2E (tenant temporário, rollback): availability por profissional, atribuição automática, recusa de horário ocupado/fora de expediente, filtro de `list_services`, e rejeição de overlap pela constraint do banco.
+
+### Fase 4 — Frontend de agenda (pendente, fora deste plano)
+- Calendário com coluna/filtro por profissional.
+
+### Robustez transversal (backlog)
+- ~~Idempotencia do webhook por `whatsapp_message_id`~~ ✅ feito (dedup no inicio da Phase 1 do webhook).
+- Debounce de mensagens rapidas do mesmo contato.
+- `webhook_secret` obrigatorio (hoje so valida se existir).
+- Lembrete/confirmacao automatica de agendamento (reduz no-show).
+
+### Rodada de correções (2026-06-17) — migration `e3f4a5b6c7d8`
+Revisão de bugs do app:
+1. **`PATCH /tenants/me` agora faz MERGE** de `ai_config`/`settings` (top-level) em vez de substituir — salvar uma aba não apaga mais chaves de outra (ex.: `scheduling_mode`). A aba de IA passou a enviar strings vazias (não `undefined`) para permitir limpar campos.
+2. **Casing de status no frontend** (`calendar-layout`, `daily-timeline`, `useCalendar`): a API devolve minúsculas (`scheduled`…); o front comparava em MAIÚSCULAS → contadores e cores do calendário estavam quebrados. Alinhado para minúsculas.
+3. **`POST /appointments`**: preenche `ends_at` e trata overlap por profissional (`409 appointment_overlap`).
+4. **Idempotência do webhook** por `whatsapp_message_id`.
+5. **`PATCH /appointments`**: recalcula `ends_at` ao mudar horário/serviço; mesmo tratamento de overlap.
+6. **`users.last_login_at`**: coluna nova, gravada no login, exposta em `UserRead` (a UI da Equipe já lia o campo).
+- Dependência: `tzdata` adicionado ao `requirements.txt` (Fase 3).

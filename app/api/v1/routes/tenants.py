@@ -48,8 +48,15 @@ async def update_my_tenant(
     if tenant is None:
         raise NotFoundError("Tenant not found.")
 
+    # `ai_config` and `settings` are JSONB blobs. A PATCH must MERGE (top-level)
+    # so sending one section never wipes keys it doesn't manage — e.g. saving the
+    # AI tab must not erase `scheduling_mode`, nor the WhatsApp/clinic settings.
     for field, value in payload.model_dump(exclude_unset=True).items():
-        setattr(tenant, field, value)
+        if field in ("ai_config", "settings") and isinstance(value, dict):
+            current = getattr(tenant, field) or {}
+            setattr(tenant, field, {**current, **value})
+        else:
+            setattr(tenant, field, value)
 
     await db.commit()
     await db.refresh(tenant)

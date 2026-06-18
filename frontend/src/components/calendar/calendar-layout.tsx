@@ -43,8 +43,8 @@ export function CalendarLayout() {
   const goNextMonth = () => setDate(new Date(date.getFullYear(), date.getMonth() + 1, 1));
 
   const totalAppts = appointments?.length || 0;
-  const confirmed = appointments?.filter(a => a.status === "CONFIRMED" || a.status === "SCHEDULED").length || 0;
-  const cancelled = appointments?.filter(a => a.status === "CANCELLED").length || 0;
+  const confirmed = appointments?.filter(a => a.status === "confirmed" || a.status === "scheduled").length || 0;
+  const cancelled = appointments?.filter(a => a.status === "cancelled").length || 0;
 
   const weekDayLabels = ["Dom", "Seg", "Ter", "Qua", "Qui", "Sex", "Sáb"];
 

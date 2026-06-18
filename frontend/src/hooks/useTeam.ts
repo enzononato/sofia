@@ -36,6 +36,17 @@ export interface UserUpdate {
   is_active?: boolean;
 }
 
+export interface WorkHourBlock {
+  weekday: number; // ISO: 1=Mon … 7=Sun
+  start_time: string; // "HH:MM" / "HH:MM:SS"
+  end_time: string;
+}
+
+export interface UserDetail extends User {
+  service_ids: string[];
+  work_hours: WorkHourBlock[];
+}
+
 export function useTeamMembers() {
   return useQuery({
     queryKey: ["team"],
@@ -73,6 +84,49 @@ export function useUpdateTeamMember() {
     },
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["team"] });
+    },
+  });
+}
+
+// ── Professional config: services offered + work hours (Fase 2) ──────────────
+
+export function useUserDetail(id?: string) {
+  return useQuery({
+    queryKey: ["user-detail", id],
+    queryFn: async () => {
+      const response = await api.get<UserDetail>(`/users/${id}`);
+      return response.data;
+    },
+    enabled: !!id,
+    staleTime: 0,
+  });
+}
+
+export function useSetUserServices() {
+  const queryClient = useQueryClient();
+
+  return useMutation({
+    mutationFn: async ({ id, service_ids }: { id: string; service_ids: string[] }) => {
+      const response = await api.put<UserDetail>(`/users/${id}/services`, { service_ids });
+      return response.data;
+    },
+    onSuccess: (_data, vars) => {
+      queryClient.invalidateQueries({ queryKey: ["user-detail", vars.id] });
+      queryClient.invalidateQueries({ queryKey: ["team"] });
+    },
+  });
+}
+
+export function useSetUserWorkHours() {
+  const queryClient = useQueryClient();
+
+  return useMutation({
+    mutationFn: async ({ id, blocks }: { id: string; blocks: WorkHourBlock[] }) => {
+      const response = await api.put<UserDetail>(`/users/${id}/work-hours`, { blocks });
+      return response.data;
+    },
+    onSuccess: (_data, vars) => {
+      queryClient.invalidateQueries({ queryKey: ["user-detail", vars.id] });
     },
   });
 }
