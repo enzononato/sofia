@@ -7,7 +7,7 @@ import { zodResolver } from "@hookform/resolvers/zod";
 import * as z from "zod";
 import { motion } from "framer-motion";
 import { Bot, Loader2, Lock, Mail } from "lucide-react";
-import axios from "axios";
+import api from "@/lib/axios";
 
 import { Button } from "@/components/ui/button";
 import {
@@ -44,13 +44,10 @@ export default function LoginPage() {
     try {
       setError(null);
       
-      const response = await axios.post(
-        `${process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000'}/api/v1/auth/login`,
-        {
-          email: values.email,
-          password: values.password,
-        }
-      );
+      const response = await api.post("/auth/login", {
+        email: values.email,
+        password: values.password,
+      });
 
       // Handle successful login
       const { access_token, refresh_token } = response.data;
