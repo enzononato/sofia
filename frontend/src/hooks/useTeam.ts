@@ -88,6 +88,48 @@ export function useUpdateTeamMember() {
   });
 }
 
+// ── Invitations (invite by email) ────────────────────────────────────────────
+
+export interface Invitation {
+  id: string;
+  email: string;
+  role: UserRole;
+  expires_at: string;
+  accepted_at?: string | null;
+  created_at: string;
+}
+
+export interface InviteResponse {
+  invitation: Invitation;
+  invite_link: string;
+  email_sent: boolean;
+}
+
+export function useInvitations() {
+  return useQuery({
+    queryKey: ["invitations"],
+    queryFn: async () => (await api.get<Invitation[]>("/users/invitations")).data,
+    staleTime: 30 * 1000,
+  });
+}
+
+export function useInviteUser() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: async (data: { email: string; role: UserRole }) =>
+      (await api.post<InviteResponse>("/users/invite", data)).data,
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: ["invitations"] }),
+  });
+}
+
+export function useRevokeInvitation() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: async (id: string) => { await api.delete(`/users/invitations/${id}`); },
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: ["invitations"] }),
+  });
+}
+
 // ── Professional config: services offered + work hours (Fase 2) ──────────────
 
 export function useUserDetail(id?: string) {

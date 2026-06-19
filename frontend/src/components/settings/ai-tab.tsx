@@ -1,7 +1,7 @@
 "use client";
 
 import { useState } from "react";
-import { useForm } from "react-hook-form";
+import { useForm, Controller } from "react-hook-form";
 import { zodResolver } from "@hookform/resolvers/zod";
 import * as z from "zod";
 import { TenantProfile, useUpdateTenant } from "@/hooks/useSettings";
@@ -11,11 +11,10 @@ import { Label } from "@/components/ui/label";
 import { Textarea } from "@/components/ui/textarea";
 import { Switch } from "@/components/ui/switch";
 import { Accordion, AccordionItem, AccordionTrigger, AccordionContent } from "@/components/ui/accordion";
-import { Bot, Key, MessageSquare, SlidersHorizontal, Save, Loader2, Sparkles } from "lucide-react";
+import { Bot, MessageSquare, SlidersHorizontal, Save, Loader2, Sparkles } from "lucide-react";
 
 const formSchema = z.object({
   model: z.string().min(1, "Obrigatório"),
-  gemini_api_key: z.string().optional(),
   temperature: z.coerce.number().min(0).max(2).optional(),
   max_output_tokens: z.coerce.number().min(100).optional(),
   system_prompt: z.string().min(10, "O prompt deve ter no mínimo 10 caracteres"),
@@ -39,14 +38,12 @@ export function AiTab({ tenant }: { tenant: TenantProfile }) {
     system_prompt: "Você é Sofia, a secretária virtual da clínica. Seja sempre educada e ajude os pacientes a marcar consultas.",
     temperature: 0.7,
     max_output_tokens: 1024,
-    gemini_api_key: "",
   };
 
-  const { register, handleSubmit, watch, formState: { errors } } = useForm<z.infer<typeof formSchema>>({
+  const { register, handleSubmit, control, formState: { errors } } = useForm<z.infer<typeof formSchema>>({
     resolver: zodResolver(formSchema) as any,
     defaultValues: {
       model: defaultValues.model || "gemini-2.0-flash",
-      gemini_api_key: defaultValues.gemini_api_key || "",
       system_prompt: defaultValues.system_prompt || "",
       temperature: defaultValues.temperature || 0.7,
       max_output_tokens: defaultValues.max_output_tokens || 1024,
@@ -69,7 +66,6 @@ export function AiTab({ tenant }: { tenant: TenantProfile }) {
       await updateTenant({
         ai_config: {
           model: data.model,
-          gemini_api_key: data.gemini_api_key || "",
           system_prompt: data.system_prompt,
           temperature: data.temperature,
           max_output_tokens: data.max_output_tokens,
@@ -94,21 +90,11 @@ export function AiTab({ tenant }: { tenant: TenantProfile }) {
       <div>
         <h3 className="text-lg font-medium">Inteligência Artificial (Sofia)</h3>
         <p className="text-sm text-muted-foreground mt-1">
-          Configure a personalidade, as regras de negócio e as chaves de acesso da sua secretária virtual.
+          Configure a personalidade, o tom de voz e as regras de negócio da sua secretária virtual.
         </p>
       </div>
 
       <div className="grid gap-6">
-        <div className="grid gap-3">
-          <Label htmlFor="gemini_api_key">Google Gemini API Key (Opcional)</Label>
-          <div className="relative">
-            <Key className="absolute left-3 top-3 h-4 w-4 text-muted-foreground" />
-            <Input id="gemini_api_key" type="password" {...register("gemini_api_key")} className="pl-9" placeholder="Se vazio, usará a chave global do sistema" />
-          </div>
-          <p className="text-xs text-muted-foreground">Recomendado inserir uma chave própria para não dividir limites de uso.</p>
-          {errors.gemini_api_key && <p className="text-sm text-destructive">{errors.gemini_api_key.message}</p>}
-        </div>
-
         <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
           <div className="grid gap-3">
             <Label htmlFor="model">Modelo de IA</Label>
@@ -162,9 +148,12 @@ export function AiTab({ tenant }: { tenant: TenantProfile }) {
               Permite que a Sofia interprete áudios (até 1m30s), imagens, vídeos e documentos enviados pelos pacientes. Aumenta o custo por mensagem.
             </p>
           </div>
-          <Switch
-            checked={watch("multimodal_enabled")}
-            onCheckedChange={(checked) => register("multimodal_enabled").onChange({ target: { name: "multimodal_enabled", value: checked } })}
+          <Controller
+            name="multimodal_enabled"
+            control={control}
+            render={({ field }) => (
+              <Switch checked={field.value} onCheckedChange={field.onChange} />
+            )}
           />
         </div>
 

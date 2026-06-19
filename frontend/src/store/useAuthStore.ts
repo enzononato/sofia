@@ -14,15 +14,13 @@ export interface TenantRead {
     system_prompt: string;
     temperature: number;
     max_output_tokens?: number;
-    gemini_api_key?: string;
+    multimodal_enabled?: boolean;
   };
   settings: {
     whatsapp?: {
-      provider?: string;
-      api_url?: string;
-      api_key?: string;
+      // Secrets (webhook_secret, provider keys) are never sent to the client.
       instance?: string;
-      webhook_secret?: string;
+      status?: string;
     };
     schedule?: {
       timezone?: string;

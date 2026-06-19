@@ -15,7 +15,7 @@ tenant.ai_config shape:
     "system_prompt": "...",                     # sobrescreve DEFAULT_SYSTEM_PROMPT (BASE)
     "temperature": 0.7,
     "max_output_tokens": 1024,
-    "gemini_api_key": "...",                    # chave por tenant (opcional)
+    # NOTE: gemini_api_key is deprecated/ignored — the server's global key is always used.
     "multimodal_enabled": false,                # liga áudio/imagem/vídeo/documento
     "prompt_first_contact": "...",              # overlays opcionais por estágio
     "prompt_imminent_appointment": "...",
@@ -103,6 +103,35 @@ def _history_text_for(msg: Message) -> str:
     return msg.content
 
 
+async def generate_followup_message(tenant: Tenant, contact: Contact) -> str | None:
+    """
+    Generate a short, warm re-engagement message for a contact who went silent.
+    Single Gemini call, no tools. Returns None on failure (caller skips sending).
+    """
+    ai_cfg = tenant.ai_config or {}
+    model = ai_cfg.get("model") or settings.DEFAULT_AI_MODEL
+    name = contact.full_name or "paciente"
+    instruction = (
+        f'Você é Sofia, secretária virtual da clínica "{tenant.name}". '
+        f"Escreva UMA mensagem curta (1 a 2 frases), calorosa e natural em português do Brasil, "
+        f"reengajando o paciente {name}, que parou de responder há alguns dias. "
+        "Convide-o gentilmente a retomar a conversa ou tirar dúvidas. "
+        "Não invente informações, não prometa nada específico e não use linguagem robótica."
+    )
+    try:
+        client = _get_client()
+        response = await client.aio.models.generate_content(
+            model=model,
+            contents=[types.Content(role="user", parts=[types.Part(text=instruction)])],
+            config=types.GenerateContentConfig(temperature=0.8, max_output_tokens=200),
+        )
+        text = (response.text or "").strip()
+        return text or None
+    except Exception:
+        logger.exception("followup_generation_failed", extra={"tenant_id": str(tenant.id), "contact_id": str(contact.id)})
+        return None
+
+
 async def generate_reply(
     tenant: Tenant,
     contact: Contact,
@@ -131,13 +160,14 @@ async def generate_reply(
     temperature = float(ai_cfg.get("temperature", 0.7))
     max_output_tokens = int(ai_cfg.get("max_output_tokens", 1024))
 
-    per_tenant_key = ai_cfg.get("gemini_api_key")
-    client = genai.Client(api_key=per_tenant_key) if per_tenant_key else _get_client()
+    # Always use the server's global Gemini key. Per-tenant keys are no longer
+    # supported: a secret must never round-trip through the frontend.
+    client = _get_client()
 
     # Stage detection + per-stage overlay + structured contact context
     stage, appts = await ai_stages.analyze(db, contact, history)
     overlay = ai_stages.overlay_for(stage, ai_cfg)
-    context_block = ai_stages.build_context_block(contact, stage, appts)
+    context_block = ai_stages.build_context_block(contact, stage, appts, tenant.settings or {})
     clinic_identity = f"Você é a secretária virtual da clínica \"{tenant.name}\"."
     system_prompt = f"{base_prompt}\n\n{clinic_identity}\n\n{overlay}\n\n{context_block}"
 
@@ -243,6 +273,7 @@ async def generate_reply(
             contact_id=uuid.UUID(str(contact.id)),
             tenant_settings=tenant.settings,
             ai_config=ai_cfg,
+            tenant_name=tenant.name,
         )
 
         logger.info(

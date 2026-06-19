@@ -4,7 +4,10 @@ import { useState } from "react";
 import { useForm } from "react-hook-form";
 import { zodResolver } from "@hookform/resolvers/zod";
 import * as z from "zod";
-import { User, UserRole, useTeamMembers, useCreateTeamMember, useUpdateTeamMember } from "@/hooks/useTeam";
+import {
+  User, UserRole, useTeamMembers, useCreateTeamMember, useUpdateTeamMember,
+  useInvitations, useInviteUser, useRevokeInvitation,
+} from "@/hooks/useTeam";
 import { useAuthStore } from "@/store/useAuthStore";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -13,7 +16,8 @@ import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, D
 import { Badge } from "@/components/ui/badge";
 import { Avatar, AvatarFallback } from "@/components/ui/avatar";
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
-import { Search, Plus, Loader2, Shield, User as UserIcon, Mail, Settings2, KeyRound, CalendarClock } from "lucide-react";
+import { Search, Plus, Loader2, Shield, Mail, Settings2, KeyRound, CalendarClock, Send, Copy, Check, Trash2, Clock } from "lucide-react";
+import { cn } from "@/lib/utils";
 import { format } from "date-fns";
 import { ptBR } from "date-fns/locale";
 import { ProfessionalConfigDialog } from "@/components/team/professional-config-dialog";
@@ -41,7 +45,7 @@ const formSchema = z.object({
   full_name: z.string().min(1, "Nome é obrigatório"),
   email: z.string().email("E-mail inválido"),
   role: z.enum(["owner", "admin", "receptionist", "professional", "viewer"]),
-  password: z.string().min(6, "Mínimo de 6 caracteres").optional().or(z.literal("")),
+  password: z.string().min(8, "Mínimo de 8 caracteres").optional().or(z.literal("")),
   is_active: z.boolean().default(true),
 });
 
@@ -53,12 +57,52 @@ export default function TeamPage() {
   const { data: team, isLoading, isError } = useTeamMembers();
   const { mutateAsync: createMember, isPending: isCreating } = useCreateTeamMember();
   const { mutateAsync: updateMember, isPending: isUpdating } = useUpdateTeamMember();
+  const { data: invitations } = useInvitations();
+  const { mutateAsync: inviteUser, isPending: isInviting } = useInviteUser();
+  const { mutateAsync: revokeInvite } = useRevokeInvitation();
 
   const [search, setSearch] = useState("");
   const [isModalOpen, setIsModalOpen] = useState(false);
   const [editingUser, setEditingUser] = useState<User | null>(null);
   const [configUser, setConfigUser] = useState<User | null>(null);
   const [generatePassword, setGeneratePassword] = useState(false);
+
+  // Invite-by-email state
+  const [inviteOpen, setInviteOpen] = useState(false);
+  const [inviteEmail, setInviteEmail] = useState("");
+  const [inviteRole, setInviteRole] = useState<UserRole>("professional");
+  const [inviteResult, setInviteResult] = useState<{ link: string; emailSent: boolean } | null>(null);
+  const [inviteError, setInviteError] = useState<string | null>(null);
+  const [copied, setCopied] = useState(false);
+
+  const resetInvite = () => {
+    setInviteOpen(false);
+    setInviteEmail("");
+    setInviteRole("professional");
+    setInviteResult(null);
+    setInviteError(null);
+    setCopied(false);
+  };
+
+  const handleInvite = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setInviteError(null);
+    try {
+      const res = await inviteUser({ email: inviteEmail, role: inviteRole });
+      setInviteResult({ link: res.invite_link, emailSent: res.email_sent });
+    } catch (err: unknown) {
+      const anyErr = err as { response?: { data?: { error?: { message?: string } } } };
+      setInviteError(anyErr?.response?.data?.error?.message || "Erro ao enviar o convite.");
+    }
+  };
+
+  const copyLink = () => {
+    if (inviteResult) {
+      navigator.clipboard.writeText(inviteResult.link);
+      setCopied(true);
+      setTimeout(() => setCopied(false), 2000);
+    }
+  };
 
   const { register, handleSubmit, reset, watch, setValue, formState: { errors } } = useForm<FormValues>({
     resolver: zodResolver(formSchema) as any,
@@ -120,15 +164,23 @@ export default function TeamPage() {
             is_active: data.is_active,
           }
         });
+        setIsModalOpen(false);
       } else {
-        await createMember({
+        const isProfessional = data.role === "professional";
+        const created = await createMember({
           email: data.email,
           full_name: data.full_name,
           role: data.role,
-          password: data.password || crypto.randomUUID().slice(0, 12),
+          // Professionals can be bookable resources without login — let the
+          // server auto-generate a password. Other roles get the shown password.
+          password: isProfessional ? undefined : (data.password || undefined),
         });
+        setIsModalOpen(false);
+        // One flow: for attending roles, jump straight into services + hours.
+        if (ATTENDING_ROLES.includes(data.role)) {
+          setConfigUser(created);
+        }
       }
-      setIsModalOpen(false);
     } catch (error) {
       console.error("Failed to save user", error);
       alert("Erro ao salvar usuário. Verifique os dados e tente novamente.");
@@ -149,9 +201,14 @@ export default function TeamPage() {
             Gerencie o acesso da sua equipe ao sistema.
           </p>
         </div>
-        <Button onClick={openNewModal} className="shrink-0">
-          <Plus className="mr-2 h-4 w-4" /> Convidar Membro
-        </Button>
+        <div className="flex gap-2 shrink-0">
+          <Button variant="outline" onClick={openNewModal}>
+            <Plus className="mr-2 h-4 w-4" /> Adicionar manualmente
+          </Button>
+          <Button onClick={() => { setInviteResult(null); setInviteError(null); setInviteOpen(true); }}>
+            <Send className="mr-2 h-4 w-4" /> Convidar por e-mail
+          </Button>
+        </div>
       </div>
 
       <div className="flex items-center space-x-2 mb-6">
@@ -296,11 +353,96 @@ export default function TeamPage() {
         </div>
       )}
 
+      {invitations && invitations.length > 0 && (
+        <div className="mt-6 rounded-xl border border-border/50 bg-card p-4">
+          <h3 className="text-sm font-semibold mb-3 flex items-center gap-2">
+            <Clock className="h-4 w-4 text-amber-500" /> Convites pendentes
+          </h3>
+          <ul className="divide-y divide-border/50">
+            {invitations.map((inv) => (
+              <li key={inv.id} className="flex items-center justify-between py-2 text-sm">
+                <div className="flex items-center gap-2 min-w-0">
+                  <Mail className="h-4 w-4 text-muted-foreground shrink-0" />
+                  <span className="truncate">{inv.email}</span>
+                  <Badge variant="outline" className={ROLE_COLORS[inv.role]}>{ROLE_LABELS[inv.role]}</Badge>
+                </div>
+                <Button variant="ghost" size="sm" onClick={() => revokeInvite(inv.id)} className="text-destructive h-8 px-2 shrink-0">
+                  <Trash2 className="h-4 w-4" />
+                </Button>
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
+
       <ProfessionalConfigDialog
         user={configUser}
         open={!!configUser}
         onOpenChange={(o) => { if (!o) setConfigUser(null); }}
       />
+
+      {/* Invite-by-email dialog */}
+      <Dialog open={inviteOpen} onOpenChange={(o) => { if (!o) resetInvite(); }}>
+        <DialogContent className="sm:max-w-[440px]">
+          <DialogHeader>
+            <DialogTitle>Convidar por e-mail</DialogTitle>
+            <DialogDescription>
+              Enviaremos um link de ativação. Se o provedor de e-mail não estiver configurado, você poderá copiar o link e enviar manualmente.
+            </DialogDescription>
+          </DialogHeader>
+
+          {inviteResult ? (
+            <div className="space-y-4 pt-2">
+              <div className={cn(
+                "rounded-lg p-3 text-sm",
+                inviteResult.emailSent ? "bg-emerald-500/10 text-emerald-600" : "bg-amber-500/10 text-amber-600",
+              )}>
+                {inviteResult.emailSent
+                  ? "Convite enviado por e-mail com sucesso! 🎉"
+                  : "Convite criado. Copie o link abaixo e envie ao membro:"}
+              </div>
+              <div className="flex gap-2">
+                <Input readOnly value={inviteResult.link} className="text-xs" onFocus={(e) => e.currentTarget.select()} />
+                <Button type="button" variant="outline" size="icon" onClick={copyLink}>
+                  {copied ? <Check className="h-4 w-4 text-emerald-500" /> : <Copy className="h-4 w-4" />}
+                </Button>
+              </div>
+              <DialogFooter>
+                <Button onClick={resetInvite}>Concluir</Button>
+              </DialogFooter>
+            </div>
+          ) : (
+            <form onSubmit={handleInvite} className="space-y-4 pt-2">
+              <div className="space-y-2">
+                <Label htmlFor="invite_email">E-mail</Label>
+                <Input id="invite_email" type="email" value={inviteEmail} onChange={(e) => setInviteEmail(e.target.value)} required placeholder="profissional@clinica.com" />
+              </div>
+              <div className="space-y-2">
+                <Label htmlFor="invite_role">Função</Label>
+                <select
+                  id="invite_role"
+                  value={inviteRole}
+                  onChange={(e) => setInviteRole(e.target.value as UserRole)}
+                  className="flex h-10 w-full rounded-md border border-input bg-background px-3 py-2 text-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                >
+                  <option value="professional">Profissional / Médico</option>
+                  <option value="receptionist">Recepcionista</option>
+                  <option value="viewer">Visualizador</option>
+                  <option value="admin">Administrador</option>
+                </select>
+              </div>
+              {inviteError && <p className="text-sm text-destructive">{inviteError}</p>}
+              <DialogFooter>
+                <Button type="button" variant="outline" onClick={resetInvite}>Cancelar</Button>
+                <Button type="submit" disabled={isInviting}>
+                  {isInviting && <Loader2 className="mr-2 h-4 w-4 animate-spin" />}
+                  Enviar convite
+                </Button>
+              </DialogFooter>
+            </form>
+          )}
+        </DialogContent>
+      </Dialog>
 
       <Dialog open={isModalOpen} onOpenChange={setIsModalOpen}>
         <DialogContent className="sm:max-w-[425px]">
@@ -352,23 +494,23 @@ export default function TeamPage() {
               )}
             </div>
 
-            {!editingUser && (
+            {!editingUser && selectedRole !== "professional" && (
               <div className="space-y-2 pt-2 border-t border-border/50">
                 <div className="flex items-center justify-between">
                   <Label htmlFor="password">Senha de Acesso</Label>
-                  <button 
-                    type="button" 
+                  <button
+                    type="button"
                     onClick={handleGeneratePassword}
                     className="text-xs text-primary hover:underline flex items-center gap-1"
                   >
                     <KeyRound className="h-3 w-3" /> Gerar automática
                   </button>
                 </div>
-                <Input 
-                  id="password" 
-                  type={generatePassword ? "text" : "password"} 
-                  {...register("password")} 
-                  placeholder="Mínimo 6 caracteres" 
+                <Input
+                  id="password"
+                  type={generatePassword ? "text" : "password"}
+                  {...register("password")}
+                  placeholder="Mínimo 8 caracteres"
                 />
                 {errors.password && <p className="text-xs text-destructive">{errors.password.message}</p>}
                 {generatePassword && (
@@ -376,6 +518,17 @@ export default function TeamPage() {
                     Copie e envie esta senha provisória para o membro.
                   </p>
                 )}
+              </div>
+            )}
+
+            {!editingUser && selectedRole === "professional" && (
+              <div className="flex items-start gap-2 pt-2 border-t border-border/50 text-xs text-muted-foreground">
+                <CalendarClock className="h-4 w-4 mt-0.5 shrink-0 text-amber-500" />
+                <p>
+                  Profissionais não precisam de senha de acesso. Após salvar, você
+                  define os <strong>serviços</strong> e <strong>horários de atendimento</strong>
+                  {" "}(que a Sofia usa para agendar).
+                </p>
               </div>
             )}
 

@@ -3,11 +3,9 @@ import api from "@/lib/axios";
 
 export interface TenantSettings {
   whatsapp?: {
-    provider?: string;
-    api_url?: string;
-    api_key?: string;
+    // Secrets (webhook_secret, provider keys) are never returned by the API.
     instance?: string;
-    webhook_secret?: string;
+    status?: string;
   };
   schedule?: {
     timezone?: string;
@@ -26,6 +24,14 @@ export interface TenantSettings {
     payment_methods?: string[];
     additional_info?: string;
   };
+  followups?: {
+    reminders_enabled?: boolean;
+    reminder_hours?: number[];
+    reengagement_enabled?: boolean;
+    reengage_after_days?: number;
+    reengage_cooldown_days?: number;
+  };
+  ignore_groups?: boolean;
 }
 
 export interface TenantAIConfig {
@@ -33,7 +39,6 @@ export interface TenantAIConfig {
   system_prompt?: string;
   temperature?: number;
   max_output_tokens?: number;
-  gemini_api_key?: string;
   multimodal_enabled?: boolean;
   prompt_first_contact?: string;
   prompt_imminent_appointment?: string;

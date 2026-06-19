@@ -1,0 +1,17 @@
+frontend/
+.git/
+.github/
+__pycache__/
+**/__pycache__/
+*.pyc
+*.pyo
+venv/
+.venv/
+.env
+.env.*
+*.egg-info/
+dist/
+build/
+.pytest_cache/
+docker/
+docker-compose*.yml

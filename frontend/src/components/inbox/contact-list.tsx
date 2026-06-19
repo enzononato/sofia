@@ -47,6 +47,22 @@ export function ContactList({ contacts, isLoading, selectedId, onSelect }: Conta
     }
   };
 
+  // WhatsApp-style preview: media messages show an icon + label instead of raw text
+  const messagePreview = (msg: NonNullable<Contact["last_message"]>) => {
+    switch (msg.media_type) {
+      case "audio":
+        return `🎤 Áudio${msg.content ? `: ${msg.content}` : ""}`;
+      case "image":
+        return `📷 ${msg.content || "Foto"}`;
+      case "video":
+        return `🎬 ${msg.content || "Vídeo"}`;
+      case "document":
+        return `📄 ${msg.content || "Documento"}`;
+      default:
+        return msg.content || "Mensagem";
+    }
+  };
+
   return (
     <div className="flex flex-col h-full bg-card">
       <div className="p-4 border-b border-border/50 bg-card/50 backdrop-blur-sm z-10 sticky top-0">
@@ -140,7 +156,7 @@ export function ContactList({ contacts, isLoading, selectedId, onSelect }: Conta
                   
                   <div className="flex items-center gap-2 mt-1">
                     <p className="text-xs text-muted-foreground truncate flex-1">
-                      {contact.last_message ? contact.last_message.content : "Nenhuma mensagem ainda."}
+                      {contact.last_message ? messagePreview(contact.last_message) : "Nenhuma mensagem ainda."}
                     </p>
                     {contact.ai_paused && (
                       <span className="w-2 h-2 rounded-full bg-amber-500 flex-shrink-0" title="Aguardando Humano" />

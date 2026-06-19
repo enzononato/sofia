@@ -22,6 +22,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.models.appointment import Appointment, AppointmentStatus
 from app.models.contact import Contact
 from app.models.message import Message
+from app.services.ai_tools import _clinic_tz, _fmt_local
 
 
 class Stage(str, Enum):
@@ -141,19 +142,36 @@ def build_context_block(
     contact: Contact,
     stage: Stage,
     appts: list[Appointment],
+    tenant_settings: dict | None = None,
 ) -> str:
     """
     Compact block of structured info about the contact that the AI can read
     directly. Includes the next upcoming appointment ID so Sofia can call
     reschedule/cancel without first looking it up.
+
+    The current date/time is injected in the clinic timezone so the AI can
+    correctly resolve relative dates ("hoje", "amanhã", "segunda que vem").
+    All appointment times are shown in that same timezone.
     """
     now = datetime.now(timezone.utc)
+    tz = _clinic_tz(tenant_settings or {})
 
-    lines: list[str] = ["--- CONTEXTO DO PACIENTE ---"]
+    lines: list[str] = ["--- CONTEXTO ATUAL ---"]
+    lines.append(f"Data e hora agora: {_fmt_local(now, tz)} (fuso {tz.key})")
+    lines.append(
+        "Sempre interprete datas relativas (hoje, amanhã, próxima segunda) "
+        "e informe horários neste fuso."
+    )
+    lines.append("")
+    lines.append("--- CONTEXTO DO PACIENTE ---")
     lines.append(f"Nome: {contact.full_name}")
     if contact.whatsapp_name and contact.whatsapp_name != contact.full_name:
         lines.append(f"Nome no WhatsApp: {contact.whatsapp_name}")
     lines.append(f"Status: {contact.status}")
+    lines.append(
+        f"Estágio no funil (CRM): {contact.crm_stage} "
+        "(use set_crm_stage só se a conversa indicar mudança clara — ex.: sem interesse → lost)"
+    )
     if contact.email:
         lines.append(f"Email: {contact.email}")
     if contact.phone:
@@ -170,7 +188,7 @@ def build_context_block(
         upcoming.sort(key=lambda a: a.scheduled_at)
         nxt = upcoming[0]
         lines.append(
-            f"Próximo agendamento: {nxt.scheduled_at.isoformat()} "
+            f"Próximo agendamento: {_fmt_local(nxt.scheduled_at, tz)} "
             f"(status={nxt.status}, id={nxt.id})"
         )
 
@@ -178,7 +196,7 @@ def build_context_block(
     completed = [a for a in appts if a.status == AppointmentStatus.COMPLETED]
     if completed:
         last = completed[0]  # appts already sorted by scheduled_at desc
-        lines.append(f"Última visita realizada: {last.scheduled_at.isoformat()}")
+        lines.append(f"Última visita realizada: {_fmt_local(last.scheduled_at, tz)}")
 
     lines.append(f"Estágio da conversa: {stage.value}")
     lines.append("--- FIM DO CONTEXTO ---")

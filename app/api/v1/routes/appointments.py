@@ -11,7 +11,7 @@ import uuid
 from datetime import datetime, timedelta
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, Query, status
+from fastapi import APIRouter, BackgroundTasks, Depends, Query, status
 from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
 
@@ -23,6 +23,8 @@ from app.models.service import Service
 from app.models.user import User, UserRole
 from app.schemas.appointment import AppointmentCreate, AppointmentRead, AppointmentUpdate
 from app.schemas.pagination import Page, PageMeta, PaginationParams, pagination_params
+from app.services import crm
+from app.services import google_calendar as gcal
 
 router = APIRouter(prefix="/appointments", tags=["Appointments"])
 
@@ -35,6 +37,7 @@ async def create_appointment(
     db: DBSession,
     tenant_id: CurrentTenantId,
     current_user: CurrentUser,
+    background_tasks: BackgroundTasks,
 ):
     """
     Create a new appointment.
@@ -64,6 +67,12 @@ async def create_appointment(
         **data,
     )
     db.add(appointment)
+
+    # CRM: a booked appointment advances the contact to the "scheduled" stage.
+    contact = await db.get(Contact, payload.contact_id)
+    if contact is not None:
+        crm.mark_scheduled(contact)
+
     try:
         await db.commit()
     except IntegrityError as exc:
@@ -75,6 +84,8 @@ async def create_appointment(
             )
         raise
     await db.refresh(appointment)
+    # Best-effort Google Calendar sync (no-op unless the professional connected GCal).
+    background_tasks.add_task(gcal.sync_appointment, appointment.id)
     return appointment
 
 
@@ -82,7 +93,7 @@ async def create_appointment(
 async def list_appointments(
     db: DBSession,
     tenant_id: CurrentTenantId,
-    _: CurrentUser,
+    current_user: CurrentUser,
     pagination: Annotated[PaginationParams, Depends(pagination_params)],
     status_filter: AppointmentStatus | None = Query(default=None, alias="status"),
     contact_id: uuid.UUID | None = Query(default=None),
@@ -93,8 +104,11 @@ async def list_appointments(
     """
     List appointments for the current tenant with optional filters.
     All filters are applied after the mandatory tenant_id scope.
+    Professionals only ever see their own appointments.
     """
     where = [Appointment.tenant_id == tenant_id]
+    if current_user.role == UserRole.PROFESSIONAL:
+        where.append(Appointment.professional_id == current_user.id)
     if status_filter:
         where.append(Appointment.status == status_filter)
     if contact_id:
@@ -125,9 +139,15 @@ async def get_appointment(
     appointment_id: uuid.UUID,
     db: DBSession,
     tenant_id: CurrentTenantId,
-    _: CurrentUser,
+    current_user: CurrentUser,
 ):
-    return await _get_or_404(db, appointment_id, tenant_id)
+    appointment = await _get_or_404(db, appointment_id, tenant_id)
+    if (
+        current_user.role == UserRole.PROFESSIONAL
+        and appointment.professional_id != current_user.id
+    ):
+        raise NotFoundError("Appointment not found.")
+    return appointment
 
 
 @router.patch("/{appointment_id}", response_model=AppointmentRead)
@@ -137,6 +157,7 @@ async def update_appointment(
     db: DBSession,
     tenant_id: CurrentTenantId,
     current_user: CurrentUser,
+    background_tasks: BackgroundTasks,
 ):
     if current_user.role not in _WRITE_ROLES:
         raise ForbiddenError("Insufficient permissions.")
@@ -166,6 +187,12 @@ async def update_appointment(
         duration = await _service_duration(db, appointment.service_id)
         appointment.ends_at = appointment.scheduled_at + timedelta(minutes=duration)
 
+    # CRM: marking an appointment completed advances the contact to "attended".
+    if new_status == AppointmentStatus.COMPLETED:
+        contact = await db.get(Contact, appointment.contact_id)
+        if contact is not None:
+            crm.mark_attended(contact)
+
     try:
         await db.commit()
     except IntegrityError as exc:
@@ -177,6 +204,8 @@ async def update_appointment(
             )
         raise
     await db.refresh(appointment)
+    # Best-effort Google Calendar sync (create/update/delete handled by status).
+    background_tasks.add_task(gcal.sync_appointment, appointment.id)
     return appointment
 
 

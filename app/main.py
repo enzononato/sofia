@@ -23,14 +23,20 @@ from app.core.logging import configure_logging
 from app.core.rate_limit import limiter
 from app.database import engine
 from app.middleware.request_id import RequestIdMiddleware
+from app.middleware.security_headers import SecurityHeadersMiddleware
 from app.middleware.tenant import TenantMiddleware
+from app.services.scheduler import shutdown_scheduler, start_scheduler
 
 
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
     configure_logging()
-    yield
-    await engine.dispose()
+    start_scheduler()
+    try:
+        yield
+    finally:
+        shutdown_scheduler()
+        await engine.dispose()
 
 
 def create_application() -> FastAPI:
@@ -68,6 +74,7 @@ def create_application() -> FastAPI:
         allow_headers=["*"],
         expose_headers=["X-Request-ID"],
     )
+    app.add_middleware(SecurityHeadersMiddleware)
     app.add_middleware(RequestIdMiddleware)
 
     # ── Exception handlers ─────────────────────────────────────────────────

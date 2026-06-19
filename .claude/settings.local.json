@@ -4,7 +4,14 @@
       "Bash(venv/Scripts/alembic revision *)",
       "Bash(venv/Scripts/pip install *)",
       "Bash(venv/Scripts/alembic upgrade *)",
-      "Bash(docker exec *)"
+      "Bash(docker exec *)",
+      "PowerShell(.\\\\venv\\\\Scripts\\\\python.exe -m alembic upgrade head 2>&1)",
+      "PowerShell(docker compose up -d 2>&1)",
+      "PowerShell(.\\\\venv\\\\Scripts\\\\python.exe -m py_compile alembic\\\\versions\\\\f4a5b6c7d8e9_add_crm_stage_to_contacts.py)",
+      "PowerShell(.\\\\venv\\\\Scripts\\\\python.exe -c \"import app.models.contact, app.schemas.contact, app.api.v1.routes.contacts; from app.models.contact import CrmStage; print\\('OK modelos/schema/rota CRM:', [s.value for s in CrmStage]\\)\")",
+      "PowerShell(.\\\\venv\\\\Scripts\\\\python.exe -c \"import app.main; import app.services.crm; import app.services.ai_tools; print\\('BACKEND IMPORT OK \\(crm + tools + app\\)'\\)\")",
+      "PowerShell(.\\\\venv\\\\Scripts\\\\python.exe -c \"import app.main; import app.api.v1.routes.reports; import app.schemas.report; print\\('BACKEND OK \\(reports + app\\)'\\)\")",
+      "PowerShell(.\\\\venv\\\\Scripts\\\\python.exe -c \"import app.main; import app.api.v1.routes.users, app.api.v1.routes.auth, app.models.invitation, app.services.email; print\\('BACKEND OK \\(invites + accept + email\\)'\\)\")"
     ]
   }
 }

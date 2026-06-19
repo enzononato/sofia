@@ -8,6 +8,7 @@ PATCH  /contacts/{id}             — update data / status
 """
 
 import uuid
+from datetime import datetime, timezone
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, Query
@@ -15,6 +16,7 @@ from sqlalchemy import desc, func, select
 
 from app.api.deps import CurrentTenantId, CurrentUser, DBSession
 from app.core.errors import ForbiddenError, NotFoundError
+from app.models.appointment import Appointment
 from app.models.contact import Contact, ContactStatus
 from app.models.message import Message
 from app.models.tenant import Tenant
@@ -33,7 +35,7 @@ _WRITE_ROLES = (UserRole.OWNER, UserRole.ADMIN, UserRole.RECEPTIONIST)
 async def list_contacts(
     db: DBSession,
     tenant_id: CurrentTenantId,
-    _: CurrentUser,
+    current_user: CurrentUser,
     pagination: Annotated[PaginationParams, Depends(pagination_params)],
     status_filter: ContactStatus | None = Query(default=None, alias="status"),
     search: str | None = Query(default=None, description="Busca por nome ou telefone"),
@@ -48,6 +50,16 @@ async def list_contacts(
       - One batch SELECT for all latest messages of those contacts (no N+1)
     """
     where = [Contact.tenant_id == tenant_id]
+    # Professionals only see patients they have appointments with.
+    if current_user.role == UserRole.PROFESSIONAL:
+        where.append(
+            Contact.id.in_(
+                select(Appointment.contact_id).where(
+                    Appointment.tenant_id == tenant_id,
+                    Appointment.professional_id == current_user.id,
+                )
+            )
+        )
     if status_filter:
         where.append(Contact.status == status_filter)
     if search:
@@ -210,7 +222,14 @@ async def update_contact(
         raise ForbiddenError("Insufficient permissions.")
 
     contact = await _get_or_404(db, contact_id, tenant_id)
-    for field, value in payload.model_dump(exclude_unset=True).items():
+    update_data = payload.model_dump(exclude_unset=True)
+
+    # A manual stage change (Kanban drag) is flagged so the AI won't auto-regress it.
+    if "crm_stage" in update_data and update_data["crm_stage"] != contact.crm_stage:
+        contact.crm_stage_source = "manual"
+        contact.crm_stage_updated_at = datetime.now(timezone.utc)
+
+    for field, value in update_data.items():
         setattr(contact, field, value)
 
     await db.commit()

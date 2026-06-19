@@ -6,8 +6,11 @@ from app.models.appointment import Appointment
 from app.models.message import Message
 from app.models.refresh_token import RefreshToken
 from app.models.professional import ProfessionalWorkHours, professional_services
+from app.models.invitation import Invitation
+from app.models.google_credentials import GoogleCalendarCredential
 
 __all__ = [
     "Tenant", "User", "Contact", "Service", "Appointment", "Message", "RefreshToken",
-    "ProfessionalWorkHours", "professional_services",
+    "ProfessionalWorkHours", "professional_services", "Invitation",
+    "GoogleCalendarCredential",
 ]

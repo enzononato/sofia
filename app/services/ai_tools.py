@@ -22,10 +22,11 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from app.models.appointment import Appointment, AppointmentStatus
-from app.models.contact import Contact
+from app.models.contact import Contact, CrmStage
 from app.models.professional import ProfessionalWorkHours, professional_services
 from app.models.service import Service
 from app.models.user import User
+from app.services import crm
 
 logger = logging.getLogger(__name__)
 
@@ -231,6 +232,33 @@ _list_professionals_decl = types.FunctionDeclaration(
     ),
 )
 
+_set_crm_stage_decl = types.FunctionDeclaration(
+    name="set_crm_stage",
+    description=(
+        "Atualiza o estágio do paciente no funil de CRM (Kanban) com base na conversa. "
+        "Use quando perceber uma mudança clara de intenção. Estágios válidos: "
+        "'in_conversation' (conversando, ainda sem agendar), "
+        "'lost' (disse que não tem interesse / não quer mais), "
+        "'post_care' (já foi atendido e está em acompanhamento). "
+        "NÃO use para 'scheduled'/'attended' — esses são definidos automaticamente ao agendar/concluir. "
+        "Não invente: só mude se a conversa indicar."
+    ),
+    parameters=types.Schema(
+        type=types.Type.OBJECT,
+        properties={
+            "stage": types.Schema(
+                type=types.Type.STRING,
+                description="Novo estágio: in_conversation | post_care | lost",
+            ),
+            "reason": types.Schema(
+                type=types.Type.STRING,
+                description="Motivo curto da mudança (ex: 'paciente disse que não tem interesse').",
+            ),
+        },
+        required=["stage"],
+    ),
+)
+
 # Single Tool object bundling all declarations
 CLINIC_TOOLS = types.Tool(
     function_declarations=[
@@ -243,6 +271,7 @@ CLINIC_TOOLS = types.Tool(
         _get_clinic_info_decl,
         _update_contact_info_decl,
         _list_professionals_decl,
+        _set_crm_stage_decl,
     ]
 )
 
@@ -258,12 +287,13 @@ async def execute_tool(
     contact_id: uuid.UUID,
     tenant_settings: dict | None = None,
     ai_config: dict | None = None,
+    tenant_name: str | None = None,
 ) -> dict:
     """
     Dispatch a Gemini function call to the appropriate handler.
     tenant_id and contact_id are ALWAYS taken from the request context — never from args.
     tenant_settings is passed through for schedule-aware tools; ai_config selects the
-    scheduling mode (capacity vs per_professional).
+    scheduling mode (capacity vs per_professional); tenant_name labels clinic info.
     """
     logger.info("Executing tool '%s' args=%s tenant=%s", name, args, tenant_id)
 
@@ -284,7 +314,7 @@ async def execute_tool(
         return await _create_appointment(db, tenant_id, contact_id, settings_, args)
 
     if name == "get_upcoming_appointments":
-        return await _get_upcoming_appointments(db, tenant_id, contact_id)
+        return await _get_upcoming_appointments(db, tenant_id, contact_id, settings_)
 
     if name == "cancel_appointment":
         return await _cancel_appointment(db, tenant_id, contact_id, args)
@@ -295,13 +325,16 @@ async def execute_tool(
         return await _reschedule_appointment(db, tenant_id, contact_id, settings_, args)
 
     if name == "get_clinic_info":
-        return await _get_clinic_info(settings_)
+        return await _get_clinic_info(settings_, tenant_name)
 
     if name == "update_contact_info":
         return await _update_contact_info(db, tenant_id, contact_id, args)
 
     if name == "list_professionals":
         return await _list_professionals(db, tenant_id, args)
+
+    if name == "set_crm_stage":
+        return await _set_crm_stage(db, tenant_id, contact_id, args)
 
     return {"error": f"Unknown tool: {name}"}
 
@@ -321,6 +354,19 @@ def _clinic_tz(tenant_settings: dict) -> ZoneInfo:
     except ZoneInfoNotFoundError:
         logger.warning("Invalid timezone '%s' — falling back to UTC", tz_name)
         return ZoneInfo("UTC")
+
+
+# Portuguese weekday names (Mon=0 … Sun=6) — strftime locale is unreliable on Windows.
+_WEEKDAYS_PT = [
+    "segunda-feira", "terça-feira", "quarta-feira", "quinta-feira",
+    "sexta-feira", "sábado", "domingo",
+]
+
+
+def _fmt_local(dt: datetime, tz: ZoneInfo) -> str:
+    """Friendly pt-BR datetime in the clinic timezone (e.g. 'sexta-feira 20/06/2026 14:00')."""
+    local = dt.astimezone(tz)
+    return f"{_WEEKDAYS_PT[local.weekday()]} {local.strftime('%d/%m/%Y %H:%M')}"
 
 
 def _resolve_schedule(tenant_settings: dict, target_date: date) -> dict:
@@ -679,6 +725,11 @@ async def _create_appointment(
     db.add(appointment)
     await db.flush()  # get the ID without committing (caller commits)
 
+    # CRM: a booked appointment advances the contact to the "scheduled" stage.
+    contact = await db.get(Contact, contact_id)
+    if contact is not None:
+        crm.mark_scheduled(contact)
+
     logger.info(
         "Appointment created by AI tool: id=%s tenant=%s contact=%s scheduled_at=%s",
         appointment.id,
@@ -691,6 +742,7 @@ async def _create_appointment(
         "success": True,
         "appointment_id": str(appointment.id),
         "scheduled_at": scheduled_at.isoformat(),
+        "scheduled_at_local": _fmt_local(scheduled_at, _clinic_tz(tenant_settings)),
         "ends_at": ends_at.isoformat(),
         "status": AppointmentStatus.SCHEDULED,
     }
@@ -700,8 +752,10 @@ async def _get_upcoming_appointments(
     db: AsyncSession,
     tenant_id: uuid.UUID,
     contact_id: uuid.UUID,
+    tenant_settings: dict,
 ) -> dict:
     now = datetime.now(timezone.utc)
+    tz = _clinic_tz(tenant_settings)
     result = await db.execute(
         select(Appointment).where(
             Appointment.tenant_id == tenant_id,
@@ -715,16 +769,33 @@ async def _get_upcoming_appointments(
     if not appointments:
         return {"appointments": [], "message": "Nenhum agendamento futuro encontrado."}
 
+    # Batch-resolve service + professional names (avoids N+1) so Sofia can say
+    # "sua Limpeza com a Dra. Ana" instead of just an opaque id.
+    service_ids = {a.service_id for a in appointments if a.service_id}
+    prof_ids = {a.professional_id for a in appointments if a.professional_id}
+    service_names: dict[uuid.UUID, str] = {}
+    prof_names: dict[uuid.UUID, str] = {}
+    if service_ids:
+        rows = await db.execute(select(Service).where(Service.id.in_(service_ids)))
+        service_names = {s.id: s.name for s in rows.scalars().all()}
+    if prof_ids:
+        rows = await db.execute(select(User).where(User.id.in_(prof_ids)))
+        prof_names = {u.id: u.full_name for u in rows.scalars().all()}
+
     return {
+        "timezone": tz.key,
         "appointments": [
             {
                 "id": str(a.id),
-                "scheduled_at": a.scheduled_at.isoformat(),
+                "scheduled_at": _fmt_local(a.scheduled_at, tz),
+                "scheduled_at_iso": a.scheduled_at.astimezone(tz).isoformat(),
                 "status": a.status,
                 "service_id": str(a.service_id) if a.service_id else None,
+                "service_name": service_names.get(a.service_id),
+                "professional_name": prof_names.get(a.professional_id),
             }
             for a in appointments
-        ]
+        ],
     }
 
 
@@ -862,20 +933,30 @@ async def _reschedule_appointment(
         "success": True,
         "appointment_id": str(appointment.id),
         "scheduled_at": appointment.scheduled_at.isoformat(),
+        "scheduled_at_local": _fmt_local(appointment.scheduled_at, _clinic_tz(tenant_settings)),
         "service_id": str(appointment.service_id) if appointment.service_id else None,
         "message": "Agendamento remarcado com sucesso.",
     }
 
 
-async def _get_clinic_info(tenant_settings: dict) -> dict:
+_WEEKDAY_NAME_PT = {
+    1: "segunda", 2: "terça", 3: "quarta", 4: "quinta",
+    5: "sexta", 6: "sábado", 7: "domingo",
+}
+
+
+async def _get_clinic_info(tenant_settings: dict, tenant_name: str | None = None) -> dict:
     """
-    Return the clinic-info block from tenant.settings.clinic plus the schedule.
-    Returns sane defaults when fields are missing — never errors.
+    Return the clinic-info block from tenant.settings.clinic plus the schedule
+    (with weekdays spelled out in pt-BR). Returns sane defaults when fields are
+    missing — never errors.
     """
     clinic = tenant_settings.get("clinic", {}) or {}
     schedule = tenant_settings.get("schedule", {}) or {}
+    working_days = schedule.get("working_days", [1, 2, 3, 4, 5])
 
     return {
+        "name": tenant_name,
         "address": clinic.get("address"),
         "phone": clinic.get("phone"),
         "email": clinic.get("email"),
@@ -884,7 +965,8 @@ async def _get_clinic_info(tenant_settings: dict) -> dict:
         "additional_info": clinic.get("additional_info"),
         "schedule": {
             "timezone": schedule.get("timezone", "UTC"),
-            "working_days": schedule.get("working_days", [1, 2, 3, 4, 5]),
+            "working_days": working_days,
+            "working_days_names": [_WEEKDAY_NAME_PT.get(d, str(d)) for d in working_days],
             "open_time": schedule.get("open_time", "08:00"),
             "close_time": schedule.get("close_time", "18:00"),
             "lunch_start": schedule.get("lunch_start"),
@@ -969,6 +1051,49 @@ async def _update_contact_info(
         "rejected": rejected,
         "message": "Cadastro atualizado.",
     }
+
+
+# Stages the AI may set directly. scheduled/attended are driven by facts
+# (appointment created/completed), so the AI is not allowed to set them here.
+_AI_SETTABLE_STAGES = {
+    CrmStage.IN_CONVERSATION.value,
+    CrmStage.POST_CARE.value,
+    CrmStage.LOST.value,
+}
+
+
+async def _set_crm_stage(
+    db: AsyncSession,
+    tenant_id: uuid.UUID,
+    contact_id: uuid.UUID,
+    args: dict,
+) -> dict:
+    """Let Sofia move the current contact in the CRM pipeline based on the
+    conversation. tenant_id/contact_id come from context — never from args."""
+    stage = (args.get("stage") or "").strip()
+    if stage not in _AI_SETTABLE_STAGES:
+        return {
+            "error": f"Estágio inválido. Use um de: {sorted(_AI_SETTABLE_STAGES)}",
+        }
+
+    contact = (
+        await db.execute(
+            select(Contact).where(Contact.id == contact_id, Contact.tenant_id == tenant_id)
+        )
+    ).scalar_one_or_none()
+    if contact is None:
+        return {"error": "Contato não encontrado."}
+
+    contact.crm_stage = stage
+    contact.crm_stage_source = "ai"
+    contact.crm_stage_updated_at = datetime.now(timezone.utc)
+    await db.flush()
+
+    logger.info(
+        "CRM stage set by AI: contact=%s tenant=%s stage=%s reason=%s",
+        contact_id, tenant_id, stage, args.get("reason"),
+    )
+    return {"success": True, "crm_stage": stage}
 
 
 # ---------------------------------------------------------------------------
@@ -1264,6 +1389,11 @@ async def _create_appointment_pp(
         logger.exception("create_appointment_pp_integrity_error", extra={"tenant_id": str(tenant_id)})
         return {"error": "Não consegui concluir o agendamento. Tente novamente ou escolha outro horário."}
 
+    # CRM: a booked appointment advances the contact to the "scheduled" stage.
+    contact = await db.get(Contact, contact_id)
+    if contact is not None:
+        crm.mark_scheduled(contact)
+
     logger.info(
         "Appointment(pp) created by AI tool: id=%s tenant=%s contact=%s prof=%s at=%s",
         appointment.id, tenant_id, contact_id, chosen.id, scheduled_at,
@@ -1273,6 +1403,7 @@ async def _create_appointment_pp(
         "success": True,
         "appointment_id": str(appointment.id),
         "scheduled_at": scheduled_at.isoformat(),
+        "scheduled_at_local": _fmt_local(scheduled_at, tz),
         "ends_at": ends_at.isoformat(),
         "professional_id": str(chosen.id),
         "professional_name": chosen.full_name,
@@ -1395,6 +1526,7 @@ async def _reschedule_appointment_pp(
         "success": True,
         "appointment_id": str(appointment.id),
         "scheduled_at": appointment.scheduled_at.isoformat(),
+        "scheduled_at_local": _fmt_local(appointment.scheduled_at, tz),
         "service_id": str(appointment.service_id) if appointment.service_id else None,
         "professional_id": str(target_prof_id),
         "message": "Agendamento remarcado com sucesso.",

@@ -48,7 +48,8 @@ class Tenant(TimestampMixin, Base):
     #   "system_prompt": "...",                    # BASE prompt (identity + invariant rules)
     #   "temperature": 0.7,
     #   "max_output_tokens": 1024,
-    #   "gemini_api_key": "<encrypted-key>",
+    #   # NOTE: gemini_api_key is deprecated — the server's global key is always used,
+    #   # and it is stripped from every API response (see app/schemas/tenant.py).
     #   "multimodal_enabled": false,               # toggles audio/image/video/document handling
     #   # Per-stage overlays — see app/services/ai_stages.py for default copy.
     #   "prompt_first_contact": "...",

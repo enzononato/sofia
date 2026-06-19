@@ -3,25 +3,34 @@
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { cn } from "@/lib/utils";
+import { useAuthStore } from "@/store/useAuthStore";
 import {
   MessageSquare,
   Calendar,
   Stethoscope,
   Users,
   Settings,
-  Bot
+  Bot,
+  KanbanSquare,
+  BarChart3,
 } from "lucide-react";
 
+// `adminOnly` items are hidden from professionals (owner/admin only).
 const navigation = [
   { name: "Inbox", href: "/dashboard/inbox", icon: MessageSquare },
+  { name: "CRM", href: "/dashboard/crm", icon: KanbanSquare },
   { name: "Calendário", href: "/dashboard/calendar", icon: Calendar },
-  { name: "Serviços", href: "/dashboard/services", icon: Stethoscope },
-  { name: "Equipe", href: "/dashboard/team", icon: Users },
-  { name: "Configurações", href: "/dashboard/settings", icon: Settings },
+  { name: "Relatórios", href: "/dashboard/reports", icon: BarChart3, adminOnly: true },
+  { name: "Serviços", href: "/dashboard/services", icon: Stethoscope, adminOnly: true },
+  { name: "Equipe", href: "/dashboard/team", icon: Users, adminOnly: true },
+  { name: "Configurações", href: "/dashboard/settings", icon: Settings, adminOnly: true },
 ];
 
 export function Sidebar({ className }: { className?: string }) {
   const pathname = usePathname();
+  const userRole = useAuthStore((s) => s.userRole);
+  const isAdmin = userRole === "owner" || userRole === "admin";
+  const visibleNav = navigation.filter((item) => !item.adminOnly || isAdmin);
 
   return (
     <div className={cn("hidden border-r border-border/50 bg-card/30 backdrop-blur-md md:block w-64 h-full", className)}>
@@ -36,7 +45,7 @@ export function Sidebar({ className }: { className?: string }) {
         </div>
         <div className="flex-1 overflow-auto py-4">
           <nav className="grid items-start px-4 text-sm font-medium gap-1">
-            {navigation.map((item) => {
+            {visibleNav.map((item) => {
               const isActive = pathname.startsWith(item.href);
               return (
                 <Link

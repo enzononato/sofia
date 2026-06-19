@@ -4,14 +4,21 @@ import { useState, useMemo } from "react";
 import { format, startOfDay, endOfDay, addDays, subDays, isToday, isSameDay, startOfWeek, addWeeks, subWeeks, eachDayOfInterval, getDay } from "date-fns";
 import { ptBR } from "date-fns/locale";
 import { Button } from "@/components/ui/button";
-import { useAppointments, useServices } from "@/hooks/useCalendar";
+import { useAppointments, useServices, type Appointment } from "@/hooks/useCalendar";
 import { useContacts } from "@/hooks/useInbox";
 import { DailyTimeline } from "./daily-timeline";
-import { ChevronLeft, ChevronRight, CalendarDays, Clock, CheckCircle2, XCircle } from "lucide-react";
+import { AppointmentModal } from "./appointment-modal";
+import { GoogleCalendarButton } from "./google-calendar-button";
+import { ChevronLeft, ChevronRight, CalendarDays, CheckCircle2, XCircle, Plus } from "lucide-react";
 import { cn } from "@/lib/utils";
 
 export function CalendarLayout() {
   const [date, setDate] = useState<Date>(new Date());
+  const [modalOpen, setModalOpen] = useState(false);
+  const [editingAppt, setEditingAppt] = useState<Appointment | null>(null);
+
+  const openNew = () => { setEditingAppt(null); setModalOpen(true); };
+  const openEdit = (appt: Appointment) => { setEditingAppt(appt); setModalOpen(true); };
 
   const dateFrom = startOfDay(date).toISOString();
   const dateTo = endOfDay(date).toISOString();
@@ -180,6 +187,10 @@ export function CalendarLayout() {
                 Ir para Hoje
               </Button>
             )}
+            <GoogleCalendarButton />
+            <Button size="sm" onClick={openNew} className="h-8 rounded-full px-3">
+              <Plus className="mr-1.5 h-4 w-4" /> Novo agendamento
+            </Button>
           </div>
         </div>
 
@@ -190,9 +201,17 @@ export function CalendarLayout() {
             contacts={contacts || []}
             services={services || []}
             isLoading={isLoading}
+            onSelect={openEdit}
           />
         </div>
       </div>
+
+      <AppointmentModal
+        open={modalOpen}
+        onOpenChange={setModalOpen}
+        appointment={editingAppt}
+        defaultDate={date}
+      />
     </div>
   );
 }

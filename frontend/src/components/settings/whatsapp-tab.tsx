@@ -1,8 +1,10 @@
 "use client";
 
 import { useState, useEffect, useCallback } from "react";
-import { TenantProfile } from "@/hooks/useSettings";
+import { TenantProfile, useUpdateTenant } from "@/hooks/useSettings";
 import { Button } from "@/components/ui/button";
+import { Switch } from "@/components/ui/switch";
+import { Label } from "@/components/ui/label";
 import {
   Dialog,
   DialogContent,
@@ -21,6 +23,7 @@ import {
   Unplug,
   CheckCircle2,
   AlertCircle,
+  Users,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 
@@ -32,7 +35,7 @@ type ConnectionStatus =
   | "unknown"
   | "loading";
 
-export function WhatsappTab({ tenant: _tenant }: { tenant: TenantProfile }) {
+export function WhatsappTab({ tenant }: { tenant: TenantProfile }) {
   const [status, setStatus] = useState<ConnectionStatus>("loading");
   const [instanceName, setInstanceName] = useState<string | null>(null);
   const [qrCode, setQrCode] = useState<string | null>(null);
@@ -41,6 +44,12 @@ export function WhatsappTab({ tenant: _tenant }: { tenant: TenantProfile }) {
   const [showDisconnectDialog, setShowDisconnectDialog] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [isPolling, setIsPolling] = useState(false);
+
+  // Behaviour settings
+  const [ignoreGroups, setIgnoreGroups] = useState<boolean>(
+    tenant.settings?.ignore_groups ?? true
+  );
+  const { mutateAsync: updateTenant, isPending: isSavingBehaviour } = useUpdateTenant();
 
   // Fetch current status on mount
   const fetchStatus = useCallback(async () => {
@@ -324,6 +333,33 @@ export function WhatsappTab({ tenant: _tenant }: { tenant: TenantProfile }) {
           </DialogFooter>
         </DialogContent>
       </Dialog>
+
+      {/* Behaviour settings */}
+      <div className="space-y-3">
+        <h4 className="text-sm font-semibold">Comportamento</h4>
+        <div className="flex flex-row items-center justify-between rounded-lg border border-border/50 p-4 bg-muted/20">
+          <div className="space-y-0.5">
+            <Label className="text-base flex items-center gap-2">
+              <Users className="h-4 w-4 text-muted-foreground" />
+              Ignorar mensagens de grupos
+            </Label>
+            <p className="text-sm text-muted-foreground">
+              A Sofia não responde mensagens enviadas em grupos do WhatsApp, apenas conversas individuais.
+            </p>
+          </div>
+          <div className="flex items-center gap-3">
+            {isSavingBehaviour && <Loader2 className="h-4 w-4 animate-spin text-muted-foreground" />}
+            <Switch
+              checked={ignoreGroups}
+              onCheckedChange={async (checked) => {
+                setIgnoreGroups(checked);
+                await updateTenant({ settings: { ignore_groups: checked } });
+              }}
+              disabled={isSavingBehaviour}
+            />
+          </div>
+        </div>
+      </div>
 
       {/* Info box */}
       <div className="rounded-xl border border-blue-500/20 bg-blue-500/5 p-4 mt-4">

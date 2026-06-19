@@ -1,5 +1,5 @@
 # PROJECT STATE — Clinic SaaS Multi-tenant
-> Handover técnico gerado em 2026-04-28. Última atualização: 2026-06-17 (Agenda multi-profissional Fases 1–3 + rodada de correções — ver §12. Alembic head: `e3f4a5b6c7d8`).
+> Handover técnico gerado em 2026-04-28. Última atualização: 2026-06-18 (§13 hardening/fuso · §14 CRM/Agenda/Relatórios · §15 papéis+convites · §16 agendador/follow-up/Google Calendar). **Alembic head `b2c3d4e5f6a7` — APLICADA ✅** (CRM, invitations, reminders/gcal). Migrations rodadas e schema verificado em 2026-06-18.
 
 ---
 
@@ -148,7 +148,6 @@ O frontend Axios intercepta `401` automaticamente, tenta `POST /auth/refresh` co
   "system_prompt": "Você é Sofia, secretária da Clínica X...",
   "temperature": 0.7,
   "max_output_tokens": 1024,
-  "gemini_api_key": "<chave-por-tenant-opcional>",
   "multimodal_enabled": false,
   "scheduling_mode": "capacity",
   "prompt_first_contact": "<override opcional>",
@@ -160,7 +159,9 @@ O frontend Axios intercepta `401` automaticamente, tenta `POST /auth/refresh` co
 }
 ```
 
-> `multimodal_enabled` (default `false`) liga o processamento de áudio (até 1m30s), imagem, vídeo e documento via Gemini multimodal. Se desligado, Sofia responde com mensagem polida pedindo texto.
+> **Segredos NUNCA são serializados ao cliente** (§13): `GET/PATCH /tenants/me` removem `ai_config.gemini_api_key` e `settings.whatsapp.{webhook_secret,api_key,api_url}` da resposta (validators em `TenantRead`). A chave por tenant (`gemini_api_key`) foi **descontinuada** — a IA usa sempre a `GEMINI_API_KEY` global do servidor; o `PATCH` descarta a chave se enviada.
+>
+> `multimodal_enabled` (default `false`) liga o processamento de áudio (até 1m30s), imagem, vídeo e documento via Gemini multimodal. Se desligado, Sofia responde com mensagem polida pedindo texto. Ligue por tenant na aba IA ou rode `python -m scripts.enable_multimodal [slug]`.
 >
 > `scheduling_mode` (default `"capacity"`) escolhe entre agenda por capacidade da clínica ou **por profissional** (`"per_professional"`). Ver §12.
 >
@@ -590,7 +591,7 @@ AI Agent SaaS/
 | 1 | **Settings UI — Sofia 2.0** (Fase 2 do upgrade da Sofia) | Aba de configuração da IA precisa ganhar: (a) toggle `multimodal_enabled`; (b) 6 textareas para overlays de estágio (`prompt_first_contact`, `prompt_imminent_appointment`, `prompt_post_appointment`, `prompt_active_patient`, `prompt_returning_lead`, `prompt_reactivation`); (c) nova aba "Clínica" para `settings.clinic` (address, phone, email, instagram, payment_methods, additional_info). Backend já aceita via `PATCH /tenants/me`. Defaults dos overlays vivem em [app/services/ai_stages.py](app/services/ai_stages.py). |
 | 2 | **Frontend: Serviços** | CRUD de procedimentos (nome, duração, preço) — necessário para a Sofia saber o que oferecer |
 | 3 | **Frontend: Equipe** | CRUD de funcionários (roles, permissões) |
-| 4 | **Criptografia de `ai_config`** | `gemini_api_key` por tenant deve ser criptografado at rest |
+| 4 | ~~**Criptografia de `ai_config`**~~ | ✅ Resolvido por remoção (§13.1): BYOK descontinuado, IA usa a chave global do servidor; segredos nunca vão ao frontend |
 | 5 | **Object storage para mídia** | Hoje `messages.media_url` armazena data URI inline (rápido pra MVP). Quando passar de ~10K mensagens com mídia, migrar para S3/Supabase Storage e guardar só URL. |
 | 6 | **Tempo real no Inbox** | Migrar de polling para SSE quando passar de ~50 usuários simultâneos. Roteiro detalhado abaixo. |
 | 7 | **Deploy produção** | Docker multi-stage, HTTPS, configuração de domínio |
@@ -706,3 +707,136 @@ Revisão de bugs do app:
 5. **`PATCH /appointments`**: recalcula `ends_at` ao mudar horário/serviço; mesmo tratamento de overlap.
 6. **`users.last_login_at`**: coluna nova, gravada no login, exposta em `UserRead` (a UI da Equipe já lia o campo).
 - Dependência: `tzdata` adicionado ao `requirements.txt` (Fase 3).
+
+---
+
+## 13. Rodada de hardening + Sofia time-aware (2026-06-18)
+
+> Foco: segurança (nenhum segredo no frontend), correção de fuso para a Sofia agendar certo, e polimento de inbox/equipe. **Sem migration** (Alembic head segue `e3f4a5b6c7d8`).
+
+### 13.1 Segurança — segredos fora do frontend
+- **`TenantRead` sanitiza a resposta** ([app/schemas/tenant.py](app/schemas/tenant.py)): `field_validator`s removem `ai_config.gemini_api_key` e `settings.whatsapp.{webhook_secret,api_key,api_url,apikey}` de **toda** resposta que usa o schema (GET e PATCH `/tenants/me`). Campos públicos (`instance`, `status`, `schedule`, `clinic`) preservados.
+- **BYOK removido**: `app/services/ai.py` usa **sempre** `settings.GEMINI_API_KEY` (global do servidor) — nunca mais instancia client com chave por tenant. `PATCH /tenants/me` faz `pop("gemini_api_key")` no merge (defesa em profundidade) e o campo sumiu da aba IA do frontend.
+- **Merge profundo** em `PATCH /tenants/me` (`_deep_merge`): updates parciais de `settings.whatsapp`/`schedule`/`clinic` não apagam mais chaves irmãs (ex.: `webhook_secret`).
+- **`SECRET_KEY` validado no boot** ([app/config.py](app/config.py)): `model_validator` falha se for o placeholder ou `<32` chars quando `DEBUG=false`; só avisa em dev.
+- **Headers de segurança** ([app/middleware/security_headers.py](app/middleware/security_headers.py)): `X-Content-Type-Options`, `X-Frame-Options=DENY`, `Referrer-Policy`, `Permissions-Policy`, `COOP`; HSTS só sob HTTPS. Registrado em [app/main.py](app/main.py).
+- **Decisão (2026-06-18):** tokens permanecem em localStorage por ora (migração para cookies httpOnly fica no backlog — risco/esforço alto).
+
+### 13.2 Sofia agora sabe que horas são (fuso do Brasil)
+- **Bug raiz:** a data/hora atual nunca era injetada no prompt → a IA "chutava" datas relativas (amanhã/segunda) e mostrava horários em UTC.
+- `ai_stages.build_context_block(..., tenant_settings)` agora abre com **`Data e hora agora: <dia-da-semana> DD/MM/YYYY HH:MM (fuso ...)`** + instrução de sempre interpretar/responder datas nesse fuso. Horários de agendamentos no contexto são localizados.
+- Helper único `_fmt_local(dt, tz)` + `_WEEKDAYS_PT` em [app/services/ai_tools.py](app/services/ai_tools.py) (reusado por `ai_stages`); nomes de dia em pt-BR manualmente (strftime de locale é instável no Windows).
+- **`get_upcoming_appointments`** agora recebe `tenant_settings`, localiza `scheduled_at` (+ `scheduled_at_iso`) e inclui `service_name` e `professional_name` (lookups em lote, sem N+1).
+- `create_appointment`/`reschedule` (capacity e per_professional) retornam `scheduled_at_local` (pt-BR) para confirmações naturais.
+
+### 13.3 `get_clinic_info` enriquecido
+- Recebe `tenant_name` (threaded via `execute_tool(..., tenant_name=tenant.name)`) e retorna `name` + `working_days_names` (dias por extenso em pt-BR).
+
+### 13.4 Multimodal
+- `multimodal_enabled` **ligado** para as clínicas existentes via [scripts/enable_multimodal.py](scripts/enable_multimodal.py) (idempotente). Novas clínicas continuam com default `false`.
+
+### 13.5 Inbox estilo WhatsApp Web
+- **Prévia de mídia** na lista de contatos ([contact-list.tsx](frontend/src/components/inbox/contact-list.tsx)): `🎤 Áudio`, `📷 Foto`, `🎬 Vídeo`, `📄 Documento` em vez de texto vazio.
+- **Separadores de data** no chat ([chat-window.tsx](frontend/src/components/inbox/chat-window.tsx)): divisórias `Hoje`/`Ontem`/data quando o dia muda.
+
+### 13.6 Criação de equipe
+- **Senha opcional** em `UserCreate` ([app/schemas/user.py](app/schemas/user.py)); `create_user` gera senha forte (`secrets.token_urlsafe`) quando ausente → profissional pode ser cadastrado como recurso agendável sem credencial.
+- **Frontend** ([team/page.tsx](frontend/src/app/dashboard/team/page.tsx)): role `professional` esconde o campo de senha e mostra nota; ao criar um profissional, abre **automaticamente** o dialog de serviços/horários (fluxo único). Validação de senha alinhada ao backend (mín. 8).
+
+### 13.7 Frontend correções herdadas (mesma sessão)
+- `Input` reescrito como `<input>` nativo com `forwardRef` (RHF voltou a ler valores → fim do "Invalid input").
+- `Switch` corrigido para os data-attributes do Base UI v1.4.1 (`data-[checked]`/`data-[unchecked]`).
+- `schedule-tab` aceita `HH:MM:SS` do browser (normaliza para `HH:MM`).
+- Toggle "Ignorar mensagens de grupos" (default ligado) em WhatsApp → backend filtra JIDs `@g.us`.
+
+### Backlog atualizado
+- ~~Criptografia de `ai_config.gemini_api_key`~~ → **resolvido por remoção** (BYOK descontinuado; chave global do servidor).
+- Pendente: migrar sessão para cookies httpOnly; object storage para mídia; SSE no inbox; limpeza de tenant duplicado de teste (`59nqq...`).
+
+---
+
+## 14. Expansão do produto — CRM, Agenda CRUD, Relatórios (Fase A, 2026-06-18)
+
+> Plano aprovado de 6 capacidades (CRM Kanban, Agenda completa, Relatórios, Convites por e-mail + papéis, Google Calendar, Follow-up automático), entregue em fases. **Fase A concluída** (CRM, Agenda CRUD, Relatórios). Fases B e C em andamento.
+>
+> **Migration nova `f4a5b6c7d8e9`** (head passa a ser esta). ⚠️ Requer `alembic upgrade head` — não aplicada ainda nesta máquina porque o Postgres/Docker estava parado durante o desenvolvimento.
+>
+> **Libs novas no frontend:** `@dnd-kit/core` + `@dnd-kit/sortable` + `@dnd-kit/utilities` (Kanban), `recharts` (gráficos).
+
+### 14.1 CRM Kanban (IA classifica + drag manual)
+- **Modelo** ([app/models/contact.py](app/models/contact.py)): enum `CrmStage` (`new_lead`, `in_conversation`, `scheduled`, `attended`, `post_care`, `lost`) + colunas `crm_stage` (default `new_lead`, indexado), `crm_stage_source` (`ai`|`manual`), `crm_stage_updated_at`, e denormalizações `last_inbound_at`/`last_followup_at` (para Fase C).
+- **Classificação determinística** ([app/services/crm.py](app/services/crm.py)): `mark_inbound` (inbound vivo → `last_inbound_at` + lead novo vira `in_conversation`), `mark_scheduled` (agendamento criado → `scheduled`, fato, avança mesmo card manual), `mark_attended` (status `completed` → `attended`). Ordem linear evita regressão automática; **movimento manual** (`source=manual`) é respeitado pela IA.
+- **Tool da IA** `set_crm_stage(stage, reason)` ([app/services/ai_tools.py](app/services/ai_tools.py)): Sofia move o card (`in_conversation`/`post_care`/`lost`; `scheduled`/`attended` são só por fato). Estágio atual exposto no `CONTEXT_BLOCK` ([ai_stages.py](app/services/ai_stages.py)).
+- **Hooks de evento**: `crm.mark_inbound` no [webhooks.py](app/api/v1/routes/webhooks.py); `crm.mark_scheduled` nas tools `create_appointment`/`create_appointment_pp` e no `POST /appointments`; `crm.mark_attended` no `PATCH /appointments` (status completed).
+- **API**: `crm_stage` exposto em `ContactRead` e aceito em `PATCH /contacts/{id}` (drag manual → marca `source=manual` + `updated_at`).
+- **Frontend**: página [crm/page.tsx](frontend/src/app/dashboard/crm/page.tsx) + [kanban-board.tsx](frontend/src/components/crm/kanban-board.tsx) (dnd-kit, optimistic update via [useCrm.ts](frontend/src/hooks/useCrm.ts)). Item "CRM" no sidebar.
+
+### 14.2 Agenda completa (CRUD no frontend)
+- Backend de appointments já existia (CRUD + status + overlap). Adicionados hooks [useCalendar.ts](frontend/src/hooks/useCalendar.ts): `useCreateAppointment`, `useUpdateAppointment` (invalidam `appointments` + `contacts`).
+- Modal [appointment-modal.tsx](frontend/src/components/calendar/appointment-modal.tsx): criar/editar (paciente, serviço, profissional, data/hora via `datetime-local` → ISO, observações) + **ações rápidas de status** (Confirmar/Compareceu/Não compareceu/Cancelar — cancelar pede motivo). Trata `409 appointment_overlap`.
+- [calendar-layout.tsx](frontend/src/components/calendar/calendar-layout.tsx): botão "Novo agendamento"; clique no card da [daily-timeline.tsx](frontend/src/components/calendar/daily-timeline.tsx) abre o modal em edição (`onSelect`).
+- **Fuso:** o modal envia `new Date(local).toISOString()` (UTC-aware) — consistente com a exibição local do calendário.
+
+### 14.3 Relatórios
+- **Backend** [reports.py](app/api/v1/routes/reports.py) (`GET /reports/overview?days=30`, **somente owner/admin**): KPIs (conversão, novos leads, agendamentos futuros, no-show) + séries (tendência de leads, distribuição por estágio CRM, agendamentos por status, volume de mensagens, top serviços). Agregações SQL escopadas por tenant; dias preenchidos para séries contínuas. Schemas em [report.py](app/schemas/report.py); router registrado em [router.py](app/api/v1/router.py).
+- **Frontend** [reports/page.tsx](frontend/src/app/dashboard/reports/page.tsx) com `recharts` (Line/Bar/Pie) + seletor 7/30/90 dias + [useReports.ts](frontend/src/hooks/useReports.ts). Item "Relatórios" no sidebar.
+
+### 14.4 Verificação
+- ✅ Estática: `python -c "import app.main"` OK (sem ciclo: `crm` só importa models; `ai_tools`/`webhooks`/`appointments` importam `crm`); `npx tsc --noEmit` limpo.
+- ⏳ **Pendente (Docker/Postgres parado):** `alembic upgrade head` (migration `f4a5b6c7d8e9`) + E2E (criar/editar/cancelar agendamento; mover card no Kanban; abrir relatórios). Rodar quando o banco subir.
+
+---
+
+## 15. Papéis (admin/profissional) + Convite por e-mail (Fase B, 2026-06-18)
+
+> **Migration nova `a1b2c3d4e5f6`** (tabela `invitations`). Convite por e-mail via **Resend** com fallback de link copiável.
+
+### 15.1 Convite por e-mail
+- **Modelo** [invitation.py](app/models/invitation.py) + migration `a1b2c3d4e5f6`: `invitations` (email, role, `token_hash` SHA-256, `expires_at`, `accepted_at`, `invited_by_user_id`). Registrado em [models/__init__.py](app/models/__init__.py).
+- **E-mail** [email.py](app/services/email.py): `send_email` via Resend (httpx). **Sem `RESEND_API_KEY` → retorna False** e o fluxo cai no link copiável (sem quebrar). Config nova: `RESEND_API_KEY`, `MAIL_FROM`, `FRONTEND_BASE_URL`, `INVITE_EXPIRE_HOURS` ([config.py](app/config.py)).
+- **Rotas** [users.py](app/api/v1/routes/users.py) (admin): `POST /users/invite` (cria token + dispara e-mail; retorna `{invitation, invite_link, email_sent}`), `GET /users/invitations` (pendentes), `DELETE /users/invitations/{id}`. **Declaradas antes de `/{user_id}`** para não colidir com a rota paramétrica. `POST /auth/accept-invite` (público — adicionado a `_PUBLIC_PATHS` em [tenant.py](app/middleware/tenant.py)): valida token, cria `User` no tenant do convite e já loga (token pair). Schemas em [invitation.py](app/schemas/invitation.py).
+- **Frontend**: hooks `useInvitations`/`useInviteUser`/`useRevokeInvitation` ([useTeam.ts](frontend/src/hooks/useTeam.ts)); botão "Convidar por e-mail" + dialog (mostra "enviado" ou link copiável) + lista de convites pendentes na [team/page.tsx](frontend/src/app/dashboard/team/page.tsx); página pública [accept-invite/page.tsx](frontend/src/app/accept-invite/page.tsx).
+
+### 15.2 Acesso por papel (admin_clinica / profissional)
+- **admin da clínica** = `owner`+`admin` (acesso total). **profissional** = `professional` (restrito).
+- Backend scoping: `professional` vê **só os próprios** agendamentos ([appointments.py](app/api/v1/routes/appointments.py) list+detail filtram por `professional_id == current_user.id`) e **só os contatos com quem atende** ([contacts.py](app/api/v1/routes/contacts.py) list filtra por subquery de appointments). Relatórios já eram owner/admin.
+- Frontend: [sidebar.tsx](frontend/src/components/dashboard/sidebar.tsx) esconde Relatórios/Serviços/Equipe/Configurações para profissional (lê `userRole` do JWT no `useAuthStore`). Inbox/CRM/Calendário visíveis (com dados escopados no backend).
+- ⚠️ **Pendente/backlog:** escopar também `GET /contacts/{id}` e `/messages` por profissional (hoje exigem conhecer o UUID; baixo risco intra-clínica).
+
+### 15.3 Verificação
+- ✅ `python -c "import app.main"` OK; `npx tsc --noEmit` limpo.
+- ⏳ **Pendente (Docker parado):** `alembic upgrade head` (`a1b2c3d4e5f6`) + E2E (convidar → aceitar → login; login como profissional e checar escopo). `RESEND_API_KEY`/`MAIL_FROM` opcionais no `.env` (sem eles, usa link copiável).
+
+---
+
+## 16. Agendador + Follow-up automático + Google Calendar (Fase C, 2026-06-18)
+
+> **Migration nova `b2c3d4e5f6a7`** (head atual): `appointments.reminders` (JSONB) + `appointments.google_event_id` + tabela `google_calendar_credentials`. **Deps novas** (já no `requirements.txt` e instaladas na venv): `apscheduler`, `cryptography`, `google-auth`, `google-auth-oauthlib`, `google-api-python-client`.
+>
+> **Princípio de segurança:** todos os recursos da Fase C degradam graciosamente — sem `GOOGLE_CLIENT_ID/SECRET` o GCal fica off; `SCHEDULER_ENABLED=false` desliga os jobs; falhas de rede são logadas, nunca quebram booking/boot.
+
+### 16.1 Agendador (APScheduler in-process)
+- [scheduler.py](app/services/scheduler.py): `AsyncIOScheduler` iniciado/parado no `lifespan` de [main.py](app/main.py), guardado por `SCHEDULER_ENABLED`. Jobs: lembretes (cada `REMINDER_JOB_MINUTES`), reengajamento (cada `REENGAGE_JOB_HOURS`), reconciliação GCal (só se configurado). `max_instances=1, coalesce=True`.
+- ⚠️ **Multi-worker:** rodar o scheduler em **1 worker só** (ou `SCHEDULER_ENABLED=false` e disparar via cron externo) para não duplicar envios.
+
+### 16.2 Follow-up automático + lembretes
+- [followups.py](app/services/followups.py): `run_appointment_reminders` (janelas marcam `appointments.reminders` p/ não repetir; lógica de "banda" entre janelas) e `run_reengagement` (contatos com `last_inbound_at` > N dias, estágio `new_lead`/`in_conversation`, não bloqueado/pausado, cooldown). Mensagem de reengajamento gerada por `ai.generate_followup_message` (chamada única ao Gemini, sem tools). Envios via `wa_service`, cada um em try/except; outbound persistido como `Message` (`ai_model_used="sofia-followup"`) → aparece no inbox.
+- **Configurável por clínica** em `settings.followups` (aba **Lembretes & Follow-up** em Configurações — [followups-tab.tsx](frontend/src/components/settings/followups-tab.tsx)): `reminders_enabled`, `reminder_hours` (lista de horas-antes, ex. `[24,2]`, máx. 72h cada), `reengagement_enabled`, `reengage_after_days`, `reengage_cooldown_days`. Defaults globais em [config.py](app/config.py) (`REMINDER_JOB_MINUTES`, `REENGAGE_JOB_HOURS`, `REENGAGE_AFTER_DAYS`, `REENGAGE_COOLDOWN_DAYS`) usados como fallback. `_reminder_windows()`/`_int_cfg()` leem e validam a config do tenant.
+
+### 16.3 Google Calendar por profissional
+- **Cripto** [crypto.py](app/core/crypto.py): Fernet via `ENCRYPTION_KEY` (ou derivado do `SECRET_KEY`). Refresh token guardado **criptografado**; nunca volta ao cliente (status expõe só boolean).
+- **Modelo** [google_credentials.py](app/models/google_credentials.py) (`google_calendar_credentials`, 1 por usuário) + `appointments.google_event_id`.
+- **OAuth** [integrations.py](app/api/v1/routes/integrations.py): `GET /integrations/google/connect` (URL de consent com `state` JWT assinado), `GET /integrations/google/callback` (**público** — em `_PUBLIC_PREFIXES`; troca code→refresh token, salva cifrado, redireciona p/ `/dashboard/calendar?google=...`), `GET /integrations/google/status`, `DELETE /integrations/google`.
+- **Sync** [google_calendar.py](app/services/google_calendar.py): chamadas síncronas do google-api-client em `asyncio.to_thread`; `sync_appointment(id)` cria/atualiza/deleta o evento no GCal do profissional (sessão própria, best-effort). Disparado em background nas rotas manuais `POST/PATCH /appointments` e pelo job `run_google_sync_reconcile` (cobre agendamentos criados pela Sofia — futuros, com profissional conectado e sem `google_event_id`).
+- **Frontend**: [useGoogleCalendar.ts](frontend/src/hooks/useGoogleCalendar.ts) + [google-calendar-button.tsx](frontend/src/components/calendar/google-calendar-button.tsx) no header do Calendário (visível a todos os papéis — cada um conecta a própria conta). Oculto se o servidor não tiver GCal configurado.
+
+### 16.4 Verificação (2026-06-18, com Postgres no ar)
+- ✅ `alembic upgrade head` aplicado; colunas/tabelas confirmadas via information_schema.
+- ✅ Smoke tests contra o banco real: `/reports/overview` (KPIs + 31 pts de série), `list_contacts` (serializa `crm_stage` + escopo de papel), `set_crm_stage` + helpers de `crm.py` (com rollback), criação de convite com fallback de link (+ cleanup).
+- ✅ Boot completo (uvicorn): `/health` 200 e **scheduler inicia** os jobs no lifespan sem erro (`gcal=False` sem credenciais).
+- ✅ `npx tsc --noEmit` limpo; `crypto` round-trip OK.
+- ⚠️ **Não executei os jobs de envio** (`run_appointment_reminders`/`run_reengagement`) contra dados reais — eles disparam WhatsApp de verdade. Quando o backend de produção reiniciar com o scheduler ligado, lembretes passam a sair para agendamentos nas próximas 72h e reengajamento para contatos inativos (só com `last_inbound_at` preenchido = mensagens novas).
+- ⏳ **Pendente do usuário (opcional):** `.env` `GOOGLE_CLIENT_ID/SECRET/REDIRECT_URI` (GCal) e `RESEND_API_KEY`/`MAIL_FROM` (envio automático de convites). Sem eles, o resto funciona (GCal oculto; convite usa link).
+
+### 16.5 Correção (revisão pós-implementação)
+- `crm.mark_scheduled`/`mark_attended` reescritos: um lead `lost` que agenda é **revivido** para `scheduled` (a ordenação linear anterior travava em "lost"). Guarda agora por conjunto "já neste estágio ou adiante".

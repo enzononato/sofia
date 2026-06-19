@@ -15,13 +15,22 @@ from pydantic import BaseModel, EmailStr, Field
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 
+from sqlalchemy import func
+
 from app.api.deps import DBSession
-from app.core.errors import ConflictError, InvalidCredentialsError, ForbiddenError
+from app.core.errors import (
+    ConflictError,
+    ForbiddenError,
+    InvalidCredentialsError,
+    UnprocessableEntityError,
+)
 from app.core.rate_limit import limiter
-from app.core.security import hash_password, verify_password
+from app.core.security import hash_password, hash_refresh_token, verify_password
 from app.config import settings
+from app.models.invitation import Invitation
 from app.models.tenant import Tenant, TenantPlan
 from app.models.user import User, UserRole
+from app.schemas.invitation import AcceptInviteRequest
 from app.services.tokens import (
     issue_token_pair,
     revoke_refresh_token,
@@ -187,6 +196,62 @@ async def logout(payload: LogoutRequest, db: DBSession):
     """Revoke the presented refresh token. Idempotent."""
     await revoke_refresh_token(db, payload.refresh_token)
     await db.commit()
+
+
+# ── POST /auth/accept-invite ──────────────────────────────────────────────────
+
+@router.post("/accept-invite", response_model=TokenPairResponse, status_code=status.HTTP_201_CREATED)
+@limiter.limit(settings.RATE_LIMIT_SIGNUP)
+async def accept_invite(payload: AcceptInviteRequest, request: Request, db: DBSession):
+    """
+    Public: redeem an invitation token to create the invited user in the
+    inviting tenant and log them in. The tenant comes from the invitation row,
+    never from a header — so this route bypasses the tenant middleware.
+    """
+    token_hash = hash_refresh_token(payload.token)
+    invitation = await db.scalar(
+        select(Invitation).where(Invitation.token_hash == token_hash)
+    )
+    now = datetime.now(timezone.utc)
+    if invitation is None or invitation.accepted_at is not None or invitation.expires_at <= now:
+        raise UnprocessableEntityError("Convite inválido ou expirado.", code="invalid_invite")
+
+    existing = await db.scalar(
+        select(func.count()).select_from(User).where(User.email == invitation.email)
+    )
+    if existing:
+        raise ConflictError("Já existe um usuário com este e-mail.", code="email_taken")
+
+    user = User(
+        tenant_id=invitation.tenant_id,
+        full_name=payload.full_name,
+        email=invitation.email,
+        hashed_password=hash_password(payload.password),
+        role=UserRole(invitation.role),
+        is_active=True,
+        last_login_at=now,
+    )
+    db.add(user)
+    invitation.accepted_at = now
+
+    try:
+        await db.flush()
+        pair = await issue_token_pair(
+            db,
+            user,
+            user_agent=request.headers.get("user-agent"),
+            ip_address=_client_ip(request),
+        )
+        await db.commit()
+    except IntegrityError:
+        await db.rollback()
+        raise ConflictError("Não foi possível concluir o cadastro.", code="duplicate_user")
+
+    logger.info(
+        "invite_accepted",
+        extra={"tenant_id": str(invitation.tenant_id), "user_id": str(user.id)},
+    )
+    return TokenPairResponse(access_token=pair.access_token, refresh_token=pair.refresh_token)
 
 
 # ── Helpers ─────────────────────────────────────────────────────────────────

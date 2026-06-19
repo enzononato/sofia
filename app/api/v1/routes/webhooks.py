@@ -28,9 +28,9 @@ from app.models.contact import Contact, ContactStatus
 from app.models.message import Message, MessageChannel, MessageDirection
 from app.models.tenant import Tenant
 from app.services import ai as ai_service
+from app.services import crm
 from app.services import whatsapp as wa_service
 from app.services import whatsapp_instance as wi
-from app.core.errors import NotFoundError
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/webhooks", tags=["Webhooks"])
@@ -152,6 +152,16 @@ async def whatsapp_webhook(
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid webhook secret."
         )
+
+    # Ignore WhatsApp group messages when the tenant has ignore_groups enabled (default: True)
+    remote_jid: str = key.get("remoteJid", "")
+    ignore_groups: bool = (tenant.settings or {}).get("ignore_groups", True)
+    if ignore_groups and remote_jid.endswith("@g.us"):
+        logger.info(
+            "webhook_group_skipped",
+            extra={"request_id": rid, "tenant_id": str(tenant.id), "jid": remote_jid},
+        )
+        return {"received": True}
 
     logger.info(
         "webhook_dispatching_to_background",
@@ -300,12 +310,33 @@ async def _process_inbound_message(tenant: Tenant, data: dict, request_id: str |
                 return
 
             base64_data, mimetype, size_bytes = download
+
+            # File size cap — reject files > 20 MB (protects Gemini and DB)
+            _MAX_MEDIA_BYTES = 20 * 1024 * 1024
+            if size_bytes > _MAX_MEDIA_BYTES:
+                if not is_historical and instance_name:
+                    kind_label = {"audio": "áudio", "image": "imagem", "video": "vídeo", "document": "documento"}.get(kind, kind)
+                    await wa_service.send_text_message(
+                        instance_name=instance_name,
+                        phone=phone,
+                        text=f"Recebi seu {kind_label}, mas ele é muito grande para processar (máximo 20 MB). Por favor, envie um arquivo menor. 😊",
+                    )
+                logger.info(
+                    "webhook_media_too_large",
+                    extra={**log_ctx, "phone": phone, "media_type": kind, "size_bytes": size_bytes},
+                )
+                return
+
             media_type = kind
             media_mime_type = mimetype
             media_size_bytes = size_bytes
             media_url = f"data:{mimetype};base64,{base64_data}"
             media_bytes = base64.b64decode(base64_data)
-            content = caption  # may be empty — that's fine, frontend renders the media
+            # For documents, use the original filename as content when there is no caption
+            if kind == "document" and not caption:
+                content = sub.get("fileName") or ""
+            else:
+                content = caption
 
         # ── Phase 1: persist inbound immediately ─────────────────────────────
         async with AsyncSessionLocal() as db:
@@ -328,6 +359,11 @@ async def _process_inbound_message(tenant: Tenant, data: dict, request_id: str |
 
                 contact = await _find_or_create_contact(db, tenant, phone, push_name, data=data)
                 ai_paused = contact.ai_paused
+
+                # CRM: record live inbound activity (powers re-engagement) and nudge
+                # a brand-new lead into "in_conversation". Skip for historical sync.
+                if not is_historical:
+                    crm.mark_inbound(contact)
 
                 inbound_msg = Message(
                     tenant_id=tenant.id,

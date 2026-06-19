@@ -10,8 +10,15 @@ import {
   Mic, Square, Paperclip, Image as ImageIcon, FileText, X, Download,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
-import { format } from "date-fns";
+import { format, isToday, isYesterday } from "date-fns";
 import { ptBR } from "date-fns/locale";
+
+// WhatsApp-style day divider label
+function dayLabel(d: Date): string {
+  if (isToday(d)) return "Hoje";
+  if (isYesterday(d)) return "Ontem";
+  return format(d, "dd 'de' MMMM 'de' yyyy", { locale: ptBR });
+}
 
 // Render the appropriate bubble content for a message:
 //  - new media (media_url set): pick by media_type
@@ -359,12 +366,23 @@ export function ChatWindow({ contact }: ChatWindowProps) {
           <>
             <div className="flex-1" />
             <div className="flex flex-col gap-3">
-              {displayMessages.map((msg) => {
+              {displayMessages.map((msg, idx) => {
                 const isOutbound = msg.direction?.toUpperCase() === "OUTBOUND";
                 const isAI = msg.ai_model_used != null;
+                const msgDate = new Date(msg.created_at);
+                const prev = displayMessages[idx - 1];
+                const showDaySep =
+                  !prev || new Date(prev.created_at).toDateString() !== msgDate.toDateString();
                 return (
+                  <div key={msg.id} className="contents">
+                  {showDaySep && (
+                    <div className="self-center my-2">
+                      <span className="text-[10px] font-medium text-muted-foreground bg-muted/60 rounded-full px-3 py-1">
+                        {dayLabel(msgDate)}
+                      </span>
+                    </div>
+                  )}
                   <div
-                    key={msg.id}
                     className={cn(
                       "flex flex-col max-w-[80%] relative",
                       isOutbound ? "self-end items-end" : "self-start items-start"
@@ -393,6 +411,7 @@ export function ChatWindow({ contact }: ChatWindowProps) {
                         </span>
                       )}
                     </div>
+                  </div>
                   </div>
                 );
               })}

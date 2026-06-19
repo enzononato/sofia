@@ -40,13 +40,18 @@ _PUBLIC_PATHS = {
     "/openapi.json",
     "/health",
     "/favicon.ico",
-    "/api/v1/auth/signup",   # tenant doesn't exist yet
-    "/api/v1/auth/login",    # tenant resolved internally from email lookup
-    "/api/v1/auth/refresh",  # tenant resolved from the refresh token row
+    "/api/v1/auth/signup",          # tenant doesn't exist yet
+    "/api/v1/auth/login",           # tenant resolved internally from email lookup
+    "/api/v1/auth/refresh",         # tenant resolved from the refresh token row
+    "/api/v1/auth/accept-invite",   # tenant resolved from the invitation token
 }
 
 # Path prefixes that bypass middleware (tenant resolved internally by handlers)
-_PUBLIC_PREFIXES = ("/api/v1/webhooks/", "/static")
+_PUBLIC_PREFIXES = (
+    "/api/v1/webhooks/",
+    "/api/v1/integrations/google/callback",  # Google redirects here without our auth
+    "/static",
+)
 
 
 _LookupBy = Literal["id", "slug", "id_or_slug"]

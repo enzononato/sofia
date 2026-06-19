@@ -11,7 +11,9 @@ Role rules:
   - ADMIN can create/edit any user except OWNERs.
 """
 
+import secrets
 import uuid
+from datetime import datetime, timedelta, timezone
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, Query, status
@@ -19,11 +21,19 @@ from sqlalchemy import func, select
 from sqlalchemy.orm import selectinload
 
 from app.api.deps import CurrentTenantId, CurrentUser, DBSession
+from app.config import settings
 from app.core.errors import ConflictError, ForbiddenError, NotFoundError
-from app.core.security import hash_password
+from app.core.security import hash_password, hash_refresh_token
+from app.models.invitation import Invitation
 from app.models.professional import ProfessionalWorkHours
 from app.models.service import Service
+from app.models.tenant import Tenant
 from app.models.user import User, UserRole
+from app.schemas.invitation import (
+    InvitationCreate,
+    InvitationCreateResponse,
+    InvitationRead,
+)
 from app.schemas.pagination import Page, PageMeta, PaginationParams, pagination_params
 from app.schemas.user import (
     ServiceAssignmentUpdate,
@@ -34,7 +44,16 @@ from app.schemas.user import (
     WorkHourBlock,
     WorkHoursUpdate,
 )
+from app.services.email import invite_email_html, send_email
 from app.services.tokens import revoke_all_user_tokens
+
+_ROLE_LABELS_PT = {
+    UserRole.OWNER: "Proprietário",
+    UserRole.ADMIN: "Administrador",
+    UserRole.RECEPTIONIST: "Recepcionista",
+    UserRole.PROFESSIONAL: "Profissional",
+    UserRole.VIEWER: "Visualizador",
+}
 
 router = APIRouter(prefix="/users", tags=["Users"])
 
@@ -60,11 +79,16 @@ async def create_user(
     if existing:
         raise ConflictError("Email already registered.", code="email_taken")
 
+    # A blank password is allowed for staff who won't log in (e.g. a professional
+    # who is only a bookable calendar resource). Generate a strong random one so
+    # the account still has a valid hash and can be given credentials later.
+    raw_password = payload.password or secrets.token_urlsafe(12)
+
     user = User(
         tenant_id=tenant_id,
         full_name=payload.full_name,
         email=payload.email,
-        hashed_password=hash_password(payload.password),
+        hashed_password=hash_password(raw_password),
         role=payload.role,
         is_active=payload.is_active,
     )
@@ -72,6 +96,110 @@ async def create_user(
     await db.commit()
     await db.refresh(user)
     return user
+
+
+# ── Invitations (declared before /{user_id} so the literal paths win) ─────────
+
+@router.post("/invite", response_model=InvitationCreateResponse, status_code=status.HTTP_201_CREATED)
+async def invite_user(
+    payload: InvitationCreate,
+    db: DBSession,
+    tenant_id: CurrentTenantId,
+    current_user: CurrentUser,
+):
+    """Invite a teammate by email. Creates an invitation token and (best-effort)
+    sends the invite email. If no email provider is configured, the invite link
+    is returned for the admin to deliver manually."""
+    if current_user.role not in _MANAGE_ROLES:
+        raise ForbiddenError("Insufficient permissions.")
+    if payload.role == UserRole.OWNER:
+        raise ForbiddenError("Não é possível convidar alguém como proprietário.")
+
+    existing = await db.scalar(
+        select(func.count()).select_from(User).where(User.email == str(payload.email))
+    )
+    if existing:
+        raise ConflictError("Já existe um usuário com este e-mail.", code="email_taken")
+
+    # Drop any previous pending invite for the same email in this tenant.
+    old = await db.execute(
+        select(Invitation).where(
+            Invitation.tenant_id == tenant_id,
+            Invitation.email == str(payload.email),
+            Invitation.accepted_at.is_(None),
+        )
+    )
+    for inv in old.scalars().all():
+        await db.delete(inv)
+
+    token = secrets.token_urlsafe(32)
+    invitation = Invitation(
+        tenant_id=tenant_id,
+        email=str(payload.email),
+        role=payload.role.value,
+        token_hash=hash_refresh_token(token),
+        expires_at=datetime.now(timezone.utc) + timedelta(hours=settings.INVITE_EXPIRE_HOURS),
+        invited_by_user_id=current_user.id,
+    )
+    db.add(invitation)
+    await db.commit()
+    await db.refresh(invitation)
+
+    invite_link = f"{settings.FRONTEND_BASE_URL}/accept-invite?token={token}"
+    tenant = await db.get(Tenant, tenant_id)
+    clinic_name = tenant.name if tenant else "sua clínica"
+    role_label = _ROLE_LABELS_PT.get(payload.role, "membro")
+    email_sent = await send_email(
+        to=str(payload.email),
+        subject=f"Convite — {clinic_name}",
+        html=invite_email_html(clinic_name, role_label, invite_link),
+    )
+
+    return InvitationCreateResponse(
+        invitation=InvitationRead.model_validate(invitation),
+        invite_link=invite_link,
+        email_sent=email_sent,
+    )
+
+
+@router.get("/invitations", response_model=list[InvitationRead])
+async def list_invitations(
+    db: DBSession,
+    tenant_id: CurrentTenantId,
+    current_user: CurrentUser,
+):
+    """Pending (unaccepted, non-expired) invitations for this clinic."""
+    if current_user.role not in _MANAGE_ROLES:
+        raise ForbiddenError("Insufficient permissions.")
+    rows = await db.execute(
+        select(Invitation)
+        .where(
+            Invitation.tenant_id == tenant_id,
+            Invitation.accepted_at.is_(None),
+            Invitation.expires_at > datetime.now(timezone.utc),
+        )
+        .order_by(Invitation.created_at.desc())
+    )
+    return [InvitationRead.model_validate(i) for i in rows.scalars().all()]
+
+
+@router.delete("/invitations/{invitation_id}", status_code=status.HTTP_204_NO_CONTENT)
+async def revoke_invitation(
+    invitation_id: uuid.UUID,
+    db: DBSession,
+    tenant_id: CurrentTenantId,
+    current_user: CurrentUser,
+):
+    if current_user.role not in _MANAGE_ROLES:
+        raise ForbiddenError("Insufficient permissions.")
+    inv = await db.scalar(
+        select(Invitation).where(
+            Invitation.id == invitation_id, Invitation.tenant_id == tenant_id
+        )
+    )
+    if inv is not None:
+        await db.delete(inv)
+        await db.commit()
 
 
 @router.get("", response_model=Page[UserRead])

@@ -14,7 +14,9 @@ class UserBase(BaseModel):
 
 
 class UserCreate(UserBase):
-    password: str = Field(..., min_length=8)
+    # Optional: when omitted (e.g. a professional who is only a bookable resource
+    # and won't log in), the server generates a strong random password.
+    password: str | None = Field(None, min_length=8)
 
 
 class UserUpdate(BaseModel):

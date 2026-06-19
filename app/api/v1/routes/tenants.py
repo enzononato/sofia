@@ -48,16 +48,34 @@ async def update_my_tenant(
     if tenant is None:
         raise NotFoundError("Tenant not found.")
 
-    # `ai_config` and `settings` are JSONB blobs. A PATCH must MERGE (top-level)
-    # so sending one section never wipes keys it doesn't manage — e.g. saving the
-    # AI tab must not erase `scheduling_mode`, nor the WhatsApp/clinic settings.
+    # `ai_config` and `settings` are JSONB blobs. A PATCH must MERGE so sending one
+    # section never wipes keys it doesn't manage — e.g. saving the AI tab must not
+    # erase `scheduling_mode`, nor the WhatsApp/clinic settings. We merge two levels
+    # deep so a partial update of `settings.whatsapp` doesn't clobber `webhook_secret`.
     for field, value in payload.model_dump(exclude_unset=True).items():
         if field in ("ai_config", "settings") and isinstance(value, dict):
             current = getattr(tenant, field) or {}
-            setattr(tenant, field, {**current, **value})
+            merged = _deep_merge(current, value)
+            if field == "ai_config":
+                # The per-tenant Gemini key is never stored: the server's global
+                # key is always used. Drop it on the way in (defence in depth).
+                merged.pop("gemini_api_key", None)
+            setattr(tenant, field, merged)
         else:
             setattr(tenant, field, value)
 
     await db.commit()
     await db.refresh(tenant)
     return tenant
+
+
+def _deep_merge(base: dict, incoming: dict) -> dict:
+    """Merge `incoming` into a copy of `base`, recursing one level into nested dicts
+    so partial updates (e.g. settings.whatsapp) preserve sibling keys/secrets."""
+    out = dict(base)
+    for key, val in incoming.items():
+        if isinstance(val, dict) and isinstance(out.get(key), dict):
+            out[key] = {**out[key], **val}
+        else:
+            out[key] = val
+    return out

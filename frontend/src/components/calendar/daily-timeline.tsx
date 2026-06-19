@@ -13,13 +13,14 @@ interface DailyTimelineProps {
   contacts: Contact[];
   services: Service[];
   isLoading: boolean;
+  onSelect?: (appt: Appointment) => void;
 }
 
 const START_HOUR = 7;
 const END_HOUR = 19;
 const ROW_HEIGHT = 72; // pixels per hour
 
-export function DailyTimeline({ date, appointments, contacts, services, isLoading }: DailyTimelineProps) {
+export function DailyTimeline({ date, appointments, contacts, services, isLoading, onSelect }: DailyTimelineProps) {
   const hours = useMemo(() => {
     const arr = [];
     const baseDate = startOfDay(date);
@@ -162,8 +163,9 @@ export function DailyTimeline({ date, appointments, contacts, services, isLoadin
               return (
                 <div
                   key={appt.id}
+                  onClick={() => onSelect?.(appt)}
                   className={cn(
-                    "absolute left-2 right-3 rounded-lg border-l-[3px] shadow-sm pointer-events-auto cursor-pointer transition-all duration-200 group overflow-hidden",
+                    "absolute left-2 right-3 rounded-lg border-l-[3px] shadow-sm pointer-events-auto cursor-pointer transition-all duration-200 group overflow-hidden hover:ring-1 hover:ring-primary/30",
                     accentColor,
                     bgColor,
                     isCancelled && "opacity-50 line-through"

@@ -2,12 +2,13 @@
 
 import { useTenantProfile } from "@/hooks/useSettings";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
-import { Building2, MessageCircle, Bot, Clock, Store } from "lucide-react";
+import { Building2, MessageCircle, Bot, Clock, Store, BellRing } from "lucide-react";
 import { GeneralTab } from "./general-tab";
 import { ClinicTab } from "./clinic-tab";
 import { WhatsappTab } from "./whatsapp-tab";
 import { AiTab } from "./ai-tab";
 import { ScheduleTab } from "./schedule-tab";
+import { FollowupsTab } from "./followups-tab";
 
 export function SettingsLayout() {
   const { data: tenant, isLoading } = useTenantProfile();
@@ -54,6 +55,11 @@ export function SettingsLayout() {
             <span className="hidden sm:inline">Horários</span>
             <span className="sm:hidden">Agenda</span>
           </TabsTrigger>
+          <TabsTrigger value="followups" className="gap-2 py-2.5 px-4 data-[state=active]:shadow-sm">
+            <BellRing className="h-4 w-4" />
+            <span className="hidden sm:inline">Lembretes & Follow-up</span>
+            <span className="sm:hidden">Follow-up</span>
+          </TabsTrigger>
         </TabsList>
       </div>
 
@@ -72,6 +78,9 @@ export function SettingsLayout() {
         </TabsContent>
         <TabsContent value="schedule" className="m-0 focus-visible:outline-none focus-visible:ring-0">
           <ScheduleTab tenant={tenant} />
+        </TabsContent>
+        <TabsContent value="followups" className="m-0 focus-visible:outline-none focus-visible:ring-0">
+          <FollowupsTab tenant={tenant} />
         </TabsContent>
       </div>
     </Tabs>

@@ -4,7 +4,7 @@ from enum import Enum as PyEnum
 from typing import TYPE_CHECKING
 
 from sqlalchemy import DateTime, ForeignKey, String, Text
-from sqlalchemy.dialects.postgresql import UUID
+from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.database import Base
@@ -64,6 +64,11 @@ class Appointment(TenantScopedMixin, Base):
     )
     notes: Mapped[str | None] = mapped_column(Text, nullable=True)
     cancellation_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+    # Which reminder windows were already sent, e.g. {"24": "<iso>", "2": "<iso>"}.
+    reminders: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
+    # Google Calendar event id (when the assigned professional has GCal connected).
+    google_event_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
 
     # Relationships
     tenant: Mapped["Tenant"] = relationship(back_populates="appointments")

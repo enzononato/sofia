@@ -1,9 +1,9 @@
 import uuid
-from datetime import date
+from datetime import date, datetime
 from enum import Enum as PyEnum
 from typing import TYPE_CHECKING
 
-from sqlalchemy import Date, ForeignKey, String, Text
+from sqlalchemy import Date, DateTime, ForeignKey, String, Text
 from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -20,6 +20,17 @@ class ContactStatus(str, PyEnum):
     ACTIVE = "active"
     INACTIVE = "inactive"
     BLOCKED = "blocked"
+
+
+class CrmStage(str, PyEnum):
+    """CRM pipeline stage (Kanban column). Distinct from ContactStatus —
+    this tracks the sales/relationship funnel that Sofia and the team manage."""
+    NEW_LEAD = "new_lead"
+    IN_CONVERSATION = "in_conversation"
+    SCHEDULED = "scheduled"
+    ATTENDED = "attended"
+    POST_CARE = "post_care"
+    LOST = "lost"
 
 
 class Contact(TenantScopedMixin, Base):
@@ -48,6 +59,18 @@ class Contact(TenantScopedMixin, Base):
     status: Mapped[ContactStatus] = mapped_column(
         String(20), nullable=False, default=ContactStatus.LEAD
     )
+
+    # CRM pipeline (Kanban). crm_stage_source = "ai" | "manual": a card moved by
+    # hand ("manual") is respected by the AI (it won't auto-regress it).
+    crm_stage: Mapped[str] = mapped_column(
+        String(30), nullable=False, server_default=CrmStage.NEW_LEAD.value, index=True
+    )
+    crm_stage_source: Mapped[str] = mapped_column(String(10), nullable=False, server_default="ai")
+    crm_stage_updated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+    # Denormalized activity timestamps powering the follow-up jobs (Fase C).
+    last_inbound_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    last_followup_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
     # WhatsApp synced data
     whatsapp_name: Mapped[str | None] = mapped_column(String(255), nullable=True)

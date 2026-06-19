@@ -36,6 +36,47 @@ interface Page<T> {
   };
 }
 
+export type AppointmentStatus = Appointment["status"];
+
+export interface AppointmentInput {
+  contact_id: string;
+  service_id?: string | null;
+  professional_id?: string | null;
+  scheduled_at: string; // ISO 8601 with timezone
+  ends_at?: string | null;
+  notes?: string | null;
+  status?: AppointmentStatus;
+  cancellation_reason?: string | null;
+}
+
+export function useCreateAppointment() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: async (data: AppointmentInput) => {
+      const res = await api.post<Appointment>("/appointments", data);
+      return res.data;
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["appointments"] });
+      queryClient.invalidateQueries({ queryKey: ["contacts"] }); // CRM stage may advance
+    },
+  });
+}
+
+export function useUpdateAppointment() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: async ({ id, data }: { id: string; data: Partial<AppointmentInput> }) => {
+      const res = await api.patch<Appointment>(`/appointments/${id}`, data);
+      return res.data;
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["appointments"] });
+      queryClient.invalidateQueries({ queryKey: ["contacts"] });
+    },
+  });
+}
+
 export function useAppointments(dateFrom: string, dateTo: string) {
   return useQuery({
     queryKey: ["appointments", dateFrom, dateTo],

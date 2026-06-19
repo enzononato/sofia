@@ -30,3 +30,14 @@ tzdata==2025.1  # IANA timezone DB — required for zoneinfo on Windows / minima
 
 # Rate limiting
 slowapi==0.1.9
+
+# Background jobs (in-process scheduler for reminders / follow-ups)
+apscheduler==3.11.2
+
+# Encryption at rest (Google OAuth refresh tokens) — Fernet
+cryptography>=43.0.0
+
+# Google Calendar integration (per-professional OAuth + event sync)
+google-auth==2.41.1
+google-auth-oauthlib==1.4.0
+google-api-python-client==2.197.0

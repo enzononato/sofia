@@ -11,12 +11,23 @@ import { Label } from "@/components/ui/label";
 import { Globe, Clock, Save, Loader2 } from "lucide-react";
 
 // For working days: 1=Seg, ..., 7=Dom. In TS/JS usually 0=Dom. We'll use 1-7 as defined in python backend.
+// Accepts "HH:MM" and "HH:MM:SS" (browser may include seconds), normalises to "HH:MM"
+const timeString = z
+  .string()
+  .transform((v) => v.slice(0, 5))
+  .pipe(z.string().regex(/^([01]\d|2[0-3]):([0-5]\d)$/, "Use o formato HH:MM"));
+
+const optionalTime = z
+  .string()
+  .transform((v) => v.slice(0, 5))
+  .pipe(z.string().regex(/^([01]\d|2[0-3]):([0-5]\d)$/, "Use o formato HH:MM").or(z.literal("")));
+
 const formSchema = z.object({
   timezone: z.string().min(1, "Obrigatório"),
-  open_time: z.string().regex(/^([01]\d|2[0-3]):([0-5]\d)$/, "Use o formato HH:MM"),
-  close_time: z.string().regex(/^([01]\d|2[0-3]):([0-5]\d)$/, "Use o formato HH:MM"),
-  lunch_start: z.string().regex(/^([01]\d|2[0-3]):([0-5]\d)$/, "Use o formato HH:MM").optional().or(z.literal("")),
-  lunch_end: z.string().regex(/^([01]\d|2[0-3]):([0-5]\d)$/, "Use o formato HH:MM").optional().or(z.literal("")),
+  open_time: timeString,
+  close_time: timeString,
+  lunch_start: optionalTime,
+  lunch_end: optionalTime,
   slot_granularity_minutes: z.coerce.number().min(5).max(120),
 });
 
