@@ -19,6 +19,10 @@ from sqlalchemy.orm import DeclarativeBase
 from app.config import settings
 
 
+_connect_args: dict = {}
+if settings.DATABASE_SCHEMA and settings.DATABASE_SCHEMA != "public":
+    _connect_args["server_settings"] = {"search_path": settings.DATABASE_SCHEMA}
+
 engine = create_async_engine(
     settings.DATABASE_URL,
     pool_size=settings.DATABASE_POOL_SIZE,
@@ -28,6 +32,7 @@ engine = create_async_engine(
     pool_pre_ping=settings.DATABASE_POOL_PRE_PING,
     echo=settings.DEBUG,
     future=True,
+    connect_args=_connect_args,
 )
 
 AsyncSessionLocal = async_sessionmaker(
