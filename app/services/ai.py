@@ -65,7 +65,15 @@ FLUXO DE AGENDAMENTO:
 1. list_services se ele não especificou o serviço.
 2. check_availability assim que souber serviço + data.
 3. Sugira o primeiro horário disponível e, se confirmado, create_appointment.
-4. Confirme o agendamento com dia, hora e nome do serviço.\
+4. Confirme o agendamento com dia, hora e nome do serviço.
+
+ESTILO DE MENSAGEM (WhatsApp):
+- Escreva como uma pessoa real no WhatsApp: mensagens curtas e naturais.
+- Quando a resposta tiver mais de uma ideia ou ficar longa, quebre em mensagens \
+menores separando cada parte com o marcador [[BREAK]] (sem espaços ao redor).
+- Cada parte deve fazer sentido sozinha; normalmente 1 a 3 partes bastam. \
+Para respostas curtas (uma única ideia), NÃO use o marcador.
+- Não numere as partes nem comente sobre a divisão; o marcador é só um separador interno.\
 """
 
 _client: genai.Client | None = None

@@ -44,6 +44,33 @@ class Settings(BaseSettings):
     DEFAULT_AI_MODEL: str = "gemini-2.0-flash"
     AI_HISTORY_LIMIT: int = 20
 
+    # ── Conversation humanization (batching, partitioned replies, typing) ─────
+    # These shape how Sofia replies on WhatsApp so it feels human. All in-process
+    # (single worker). Disable any layer independently via the *_ENABLED flags.
+    #
+    # Batching: accumulate rapid-fire messages from the same contact before
+    # replying once. A new inbound resets the timer (debounce). Media flushes
+    # the batch immediately.
+    MESSAGE_BATCHING_ENABLED: bool = True
+    BATCH_WINDOW_MIN_SECONDS: float = 8.0      # lower bound of the debounce window
+    BATCH_WINDOW_MAX_SECONDS: float = 10.0     # upper bound (random within [min, max])
+
+    # Partitioned replies: the model splits long answers with a delimiter; we
+    # send each part as its own WhatsApp message.
+    RESPONSE_SPLIT_ENABLED: bool = True
+    RESPONSE_SPLIT_MAX_CHARS: int = 320        # fallback split size when the model omits the delimiter
+
+    # Human typing simulation: "composing" presence + delay proportional to the
+    # part length, with random jitter (never a fixed delay).
+    TYPING_SIMULATION_ENABLED: bool = True
+    TYPING_CHARS_PER_SECOND: float = 25.0      # simulated typing speed
+    TYPING_MIN_SECONDS: float = 1.2            # floor per part
+    TYPING_MAX_SECONDS: float = 6.0            # ceiling per part
+    TYPING_JITTER: float = 0.15                # ±15% random variation
+
+    # Read receipt: mark the patient's messages as read before replying.
+    READ_RECEIPT_ENABLED: bool = True
+
     # ── Evolution API (provider-managed — credentials never exposed to tenants) ─
     EVOLUTION_API_URL: Optional[str] = None
     EVOLUTION_API_KEY: Optional[str] = None

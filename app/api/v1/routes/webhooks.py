@@ -13,6 +13,7 @@ The handler returns 200 immediately and processes the message in a
 FastAPI BackgroundTask to avoid blocking Evolution API's retry logic.
 """
 
+import asyncio
 import base64
 import logging
 import time
@@ -29,6 +30,8 @@ from app.models.message import Message, MessageChannel, MessageDirection
 from app.models.tenant import Tenant
 from app.services import ai as ai_service
 from app.services import crm
+from app.services import humanizer
+from app.services import message_batcher as batcher
 from app.services import whatsapp as wa_service
 from app.services import whatsapp_instance as wi
 
@@ -240,12 +243,12 @@ async def _process_inbound_message(tenant: Tenant, data: dict, request_id: str |
 
         media_info = _detect_media(message_obj)
 
-        # Defaults — populated below for the media path
+        # Defaults — populated below for the media path. The decoded bytes are no
+        # longer kept here: Phase 2 reconstructs media from the stored data URI.
         media_type: str | None = None
         media_mime_type: str | None = None
         media_size_bytes: int | None = None
         media_url: str | None = None
-        media_bytes: bytes | None = None
 
         # ── Pure text fast path ────────────────────────────────────────────
         if media_info is None:
@@ -331,7 +334,6 @@ async def _process_inbound_message(tenant: Tenant, data: dict, request_id: str |
             media_mime_type = mimetype
             media_size_bytes = size_bytes
             media_url = f"data:{mimetype};base64,{base64_data}"
-            media_bytes = base64.b64decode(base64_data)
             # For documents, use the original filename as content when there is no caption
             if kind == "document" and not caption:
                 content = sub.get("fileName") or ""
@@ -381,7 +383,6 @@ async def _process_inbound_message(tenant: Tenant, data: dict, request_id: str |
                 await db.commit()
 
                 contact_id = contact.id
-                inbound_id = inbound_msg.id
             except Exception:
                 await db.rollback()
                 raise
@@ -397,58 +398,185 @@ async def _process_inbound_message(tenant: Tenant, data: dict, request_id: str |
             logger.info("webhook_ai_paused", extra={**log_ctx, "phone": phone, "contact_id": str(contact_id)})
             return
 
-        # ── Phase 2: AI reply (tool writes share this transaction) ────────────
-        async with AsyncSessionLocal() as db:
-            try:
-                result = await db.execute(select(Contact).where(Contact.id == contact_id))
-                contact = result.scalar_one()
-
-                history = await _fetch_history(db, tenant.id, contact_id, exclude_id=inbound_id)
-
-                reply_text, model_used = await ai_service.generate_reply(
-                    tenant=tenant,
-                    contact=contact,
-                    new_message=content,
-                    history=history,
-                    db=db,
-                    media=(media_bytes, media_mime_type) if media_bytes else None,
-                )
-
-                outbound_msg = Message(
-                    tenant_id=tenant.id,
-                    contact_id=contact_id,
-                    direction=MessageDirection.OUTBOUND,
-                    channel=MessageChannel.WHATSAPP,
-                    content=reply_text,
-                    ai_model_used=model_used,
-                )
-                db.add(outbound_msg)
-                await db.commit()
-            except Exception:
-                await db.rollback()
-                raise
-
         if not instance_name:
             logger.error("webhook_no_instance", extra=log_ctx)
             return
 
-        await wa_service.send_text_message(
-            instance_name=instance_name, phone=phone, text=reply_text,
-        )
+        # ── Phase 2 dispatch: debounce text bursts; flush media immediately ────
+        # The actual reply runs in _generate_and_send, which re-reads the
+        # unanswered messages from the DB — so it naturally covers every message
+        # accumulated during the debounce window.
+        has_media = media_type is not None
 
-        logger.info(
-            "webhook_processed",
-            extra={
-                **log_ctx,
-                "phone": phone,
-                "contact_id": str(contact_id),
-                "model": model_used,
-                "media_type": media_type,
-            },
-        )
+        async def _work() -> None:
+            await _generate_and_send(
+                tenant=tenant,
+                contact_id=contact_id,
+                phone=phone,
+                instance_name=instance_name,
+                request_id=request_id,
+            )
+
+        if has_media:
+            await batcher.flush(contact_id, _work)
+        else:
+            batcher.schedule(contact_id, _work)
 
     except Exception:
         logger.exception("webhook_processing_error", extra=log_ctx)
+
+
+async def _generate_and_send(
+    tenant: Tenant,
+    contact_id: uuid.UUID,
+    phone: str,
+    instance_name: str,
+    request_id: str | None,
+) -> None:
+    """
+    Produce and deliver Sofia's reply for all messages a contact sent during the
+    debounce window, simulating human behavior:
+      1. Mark the patient's messages as read (read receipt).
+      2. Generate one reply over the combined unanswered messages.
+      3. Split it into natural parts; send each with a "typing" presence and a
+         randomized, length-proportional delay.
+
+    AI tool writes are committed right after generation (before sending), so a
+    later WhatsApp delivery error never rolls back a booking the AI made.
+    """
+    log_ctx = {"request_id": request_id, "tenant_id": str(tenant.id), "contact_id": str(contact_id)}
+    remote_jid = f"{phone}@s.whatsapp.net"
+
+    async with AsyncSessionLocal() as db:
+        try:
+            contact = await db.scalar(select(Contact).where(Contact.id == contact_id))
+            if contact is None:
+                logger.warning("webhook_contact_missing", extra=log_ctx)
+                return
+
+            # The admin may have paused the AI during the debounce window.
+            if contact.ai_paused:
+                logger.info("webhook_ai_paused_late", extra=log_ctx)
+                return
+
+            unanswered = await _collect_unanswered(db, tenant.id, contact_id)
+            if not unanswered:
+                logger.info("webhook_nothing_to_answer", extra=log_ctx)
+                return
+
+            exclude_ids = {m.id for m in unanswered}
+            wa_ids = [m.whatsapp_message_id for m in unanswered if m.whatsapp_message_id]
+            combined_text = "\n".join(m.content for m in unanswered if m.content).strip()
+            media = _latest_media(unanswered)
+
+            history = await _fetch_history(db, tenant.id, contact_id, exclude_ids=exclude_ids)
+
+            reply_text, model_used = await ai_service.generate_reply(
+                tenant=tenant,
+                contact=contact,
+                new_message=combined_text,
+                history=history,
+                db=db,
+                media=media,
+            )
+            # Persist any tool writes (e.g. create_appointment) now.
+            await db.commit()
+        except Exception:
+            await db.rollback()
+            raise
+
+    # ── Read receipt before replying (best-effort) ───────────────────────────
+    if settings.READ_RECEIPT_ENABLED and wa_ids:
+        await wa_service.mark_messages_as_read(instance_name, remote_jid, wa_ids)
+
+    # ── Partitioned, human-paced delivery ────────────────────────────────────
+    parts = humanizer.split_reply(reply_text)
+    for part in parts:
+        if not part:
+            continue
+        if settings.TYPING_SIMULATION_ENABLED:
+            delay = humanizer.typing_delay_seconds(part)
+            await wa_service.send_presence(instance_name, phone, "composing", int(delay * 1000))
+            await asyncio.sleep(delay)
+        await wa_service.send_text_message(instance_name=instance_name, phone=phone, text=part)
+        await _save_outbound(tenant.id, contact_id, part, model_used)
+
+    logger.info(
+        "webhook_processed",
+        extra={**log_ctx, "phone": phone, "model": model_used, "parts": len(parts)},
+    )
+
+
+async def _save_outbound(
+    tenant_id: uuid.UUID, contact_id: uuid.UUID, content: str, model_used: str
+) -> None:
+    """Persist one delivered outbound part. Failure here is logged, not raised,
+    so a DB hiccup can't abort the remaining parts that already went out."""
+    async with AsyncSessionLocal() as db:
+        try:
+            db.add(
+                Message(
+                    tenant_id=tenant_id,
+                    contact_id=contact_id,
+                    direction=MessageDirection.OUTBOUND,
+                    channel=MessageChannel.WHATSAPP,
+                    content=content,
+                    ai_model_used=model_used,
+                )
+            )
+            await db.commit()
+        except Exception:
+            await db.rollback()
+            logger.exception("outbound_persist_failed", extra={"contact_id": str(contact_id)})
+
+
+def _latest_media(messages: list[Message]) -> tuple[bytes, str] | None:
+    """Reconstruct (bytes, mime) from the most recent media message in the burst,
+    decoding the data URI saved in Phase 1. Returns None when there's no media."""
+    for msg in reversed(messages):
+        if msg.media_url and msg.media_mime_type:
+            data = _decode_data_uri(msg.media_url)
+            if data is not None:
+                return data, msg.media_mime_type
+    return None
+
+
+def _decode_data_uri(media_url: str) -> bytes | None:
+    if not media_url or not media_url.startswith("data:"):
+        return None
+    try:
+        return base64.b64decode(media_url.split(",", 1)[1])
+    except Exception:
+        return None
+
+
+async def _collect_unanswered(
+    db: AsyncSession, tenant_id: uuid.UUID, contact_id: uuid.UUID
+) -> list[Message]:
+    """All inbound messages received after the last outbound (the burst to answer),
+    oldest-first. If the AI never replied yet, returns every inbound message."""
+    last_outbound_at = await db.scalar(
+        select(Message.created_at)
+        .where(
+            Message.tenant_id == tenant_id,
+            Message.contact_id == contact_id,
+            Message.direction == MessageDirection.OUTBOUND,
+        )
+        .order_by(desc(Message.created_at))
+        .limit(1)
+    )
+
+    stmt = select(Message).where(
+        Message.tenant_id == tenant_id,
+        Message.contact_id == contact_id,
+        Message.direction == MessageDirection.INBOUND,
+    )
+    if last_outbound_at is not None:
+        stmt = stmt.where(Message.created_at > last_outbound_at)
+    stmt = stmt.order_by(Message.created_at)
+
+    result = await db.execute(stmt)
+    return list(result.scalars().all())
 
 
 async def _resolve_tenant_or_none(db: AsyncSession, slug: str) -> Tenant | None:
@@ -508,17 +636,16 @@ async def _fetch_history(
     db: AsyncSession,
     tenant_id: uuid.UUID,
     contact_id: uuid.UUID,
-    exclude_id: uuid.UUID,
+    exclude_ids: set[uuid.UUID],
 ) -> list[Message]:
-    """Latest messages, oldest-first (correct order for the AI prompt)."""
-    result = await db.execute(
-        select(Message)
-        .where(
-            Message.tenant_id == tenant_id,
-            Message.contact_id == contact_id,
-            Message.id != exclude_id,
-        )
-        .order_by(desc(Message.created_at))
-        .limit(settings.AI_HISTORY_LIMIT)
+    """Latest messages (excluding the current burst), oldest-first for the prompt."""
+    stmt = select(Message).where(
+        Message.tenant_id == tenant_id,
+        Message.contact_id == contact_id,
     )
+    if exclude_ids:
+        stmt = stmt.where(Message.id.not_in(exclude_ids))
+    stmt = stmt.order_by(desc(Message.created_at)).limit(settings.AI_HISTORY_LIMIT)
+
+    result = await db.execute(stmt)
     return list(reversed(result.scalars().all()))

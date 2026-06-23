@@ -76,6 +76,95 @@ async def send_text_message(
             raise
 
 
+async def send_presence(
+    instance_name: str,
+    phone: str,
+    presence: str = "composing",
+    delay_ms: int = 2000,
+) -> None:
+    """
+    Send a presence update ("digitando..."/typing) via Evolution API.
+
+    Best-effort: a failure here must NEVER block the actual reply, so all errors
+    are swallowed (logged at debug/warning only).
+
+    Args:
+        instance_name: the Evolution instance name.
+        phone: destination in E.164 without '+'.
+        presence: "composing" (typing) | "recording" | "available" | "paused".
+        delay_ms: how long Evolution should keep the presence active, in ms.
+    """
+    try:
+        api_url, api_key = _validate_provider()
+    except RuntimeError:
+        return
+
+    url = f"{api_url}/chat/sendPresence/{instance_name}"
+    payload = {"number": phone, "delay": delay_ms, "presence": presence}
+    headers = {"apikey": api_key, "Content-Type": "application/json"}
+
+    async with httpx.AsyncClient(timeout=10) as client:
+        try:
+            response = await client.post(url, json=payload, headers=headers)
+            response.raise_for_status()
+            logger.debug(
+                "whatsapp_presence_sent",
+                extra={"phone": phone, "instance": instance_name, "presence": presence},
+            )
+        except (httpx.HTTPStatusError, httpx.RequestError) as exc:
+            logger.warning(
+                "whatsapp_presence_failed",
+                extra={"phone": phone, "instance": instance_name, "error": str(exc)[:200]},
+            )
+
+
+async def mark_messages_as_read(
+    instance_name: str,
+    remote_jid: str,
+    message_ids: list[str],
+) -> None:
+    """
+    Mark inbound WhatsApp messages as read (blue ticks) via Evolution API.
+
+    Best-effort: errors are swallowed so they can never block the reply flow.
+
+    Args:
+        instance_name: the Evolution instance name.
+        remote_jid: the chat JID (e.g. "5511999999999@s.whatsapp.net").
+        message_ids: Evolution message IDs (key.id from the inbound webhook).
+    """
+    ids = [mid for mid in message_ids if mid]
+    if not ids:
+        return
+
+    try:
+        api_url, api_key = _validate_provider()
+    except RuntimeError:
+        return
+
+    url = f"{api_url}/chat/markMessageAsRead/{instance_name}"
+    payload = {
+        "readMessages": [
+            {"remoteJid": remote_jid, "fromMe": False, "id": mid} for mid in ids
+        ]
+    }
+    headers = {"apikey": api_key, "Content-Type": "application/json"}
+
+    async with httpx.AsyncClient(timeout=10) as client:
+        try:
+            response = await client.post(url, json=payload, headers=headers)
+            response.raise_for_status()
+            logger.debug(
+                "whatsapp_marked_read",
+                extra={"instance": instance_name, "count": len(ids)},
+            )
+        except (httpx.HTTPStatusError, httpx.RequestError) as exc:
+            logger.warning(
+                "whatsapp_mark_read_failed",
+                extra={"instance": instance_name, "error": str(exc)[:200]},
+            )
+
+
 async def send_media_message(
     instance_name: str,
     phone: str,

@@ -1,5 +1,5 @@
 # PROJECT STATE — Clinic SaaS Multi-tenant
-> Handover técnico gerado em 2026-04-28. Última atualização: 2026-06-18 (§13 hardening/fuso · §14 CRM/Agenda/Relatórios · §15 papéis+convites · §16 agendador/follow-up/Google Calendar). **Alembic head `b2c3d4e5f6a7` — APLICADA ✅** (CRM, invitations, reminders/gcal). Migrations rodadas e schema verificado em 2026-06-18.
+> Handover técnico gerado em 2026-04-28. Última atualização: 2026-06-23 (§17 humanização de mensagens WhatsApp). **Alembic head `b2c3d4e5f6a7` — APLICADA ✅** (CRM, invitations, reminders/gcal). §17 sem migration.
 
 ---
 
@@ -712,6 +712,8 @@ Revisão de bugs do app:
 
 ## 13. Rodada de hardening + Sofia time-aware (2026-06-18)
 
+> **Atualizado 2026-06-23:** §17 — Humanização de mensagens (batching + replies particionadas + simulação humana).
+
 > Foco: segurança (nenhum segredo no frontend), correção de fuso para a Sofia agendar certo, e polimento de inbox/equipe. **Sem migration** (Alembic head segue `e3f4a5b6c7d8`).
 
 ### 13.1 Segurança — segredos fora do frontend
@@ -840,3 +842,94 @@ Revisão de bugs do app:
 
 ### 16.5 Correção (revisão pós-implementação)
 - `crm.mark_scheduled`/`mark_attended` reescritos: um lead `lost` que agenda é **revivido** para `scheduled` (a ordenação linear anterior travava em "lost"). Guarda agora por conjunto "já neste estágio ou adiante".
+
+---
+
+## 17. Humanização de Mensagens WhatsApp (2026-06-23)
+
+> **Sem migration.** Três camadas empilhadas que fazem a Sofia parecer uma pessoa real no WhatsApp. Todas in-process (1-worker, mesma restrição do scheduler). Cada camada pode ser desligada independentemente via flag no `.env`.
+
+### 17.1 Message Batching (debounce por contato)
+
+**Arquivo:** [app/services/message_batcher.py](app/services/message_batcher.py)
+
+- Registry `contact_id → asyncio.Task` em memória de processo.
+- `schedule(contact_id, work)`: cancela o timer existente e cria um novo com janela aleatória entre `BATCH_WINDOW_MIN_SECONDS` e `BATCH_WINDOW_MAX_SECONDS` (padrão 8–10 s). O timer reseta a cada nova mensagem do mesmo contato.
+- Quando o timer dispara, executa `work` **uma única vez** — que por sua vez re-lê **todas** as mensagens inbound não respondidas do banco (Phase 2 não depende de qual mensagem acionou o timer).
+- `flush(contact_id, work)`: cancela o timer e executa imediatamente. Usado para **mensagens de mídia**, que não devem esperar a janela de debounce.
+- `MESSAGE_BATCHING_ENABLED=false` desativa o debounce e despacha imediatamente.
+- **Cuidado:** timer perdido em reinício do worker. A mensagem persiste no banco (Phase 1 sempre salva), mas a resposta automática não acontece para bursts no exato momento do restart.
+
+### 17.2 Replies Particionadas
+
+**Arquivo:** [app/services/humanizer.py](app/services/humanizer.py) + prompt em [app/services/ai.py](app/services/ai.py)
+
+- `DEFAULT_SYSTEM_PROMPT` instrui a Sofia a separar partes longas com `[[BREAK]]` (extremamente improvável em texto natural pt-BR).
+- `split_reply(text)`:
+  1. Se `[[BREAK]]` presente → divide aí (caminho principal).
+  2. Se `RESPONSE_SPLIT_ENABLED=true` e texto > `RESPONSE_SPLIT_MAX_CHARS` (padrão 320) → fallback por parágrafos/frases (`_split_by_length` + `_split_sentences`).
+  3. Retorna sempre `list[str]` com ≥ 1 item, nunca vaza o marcador.
+- Cada parte é enviada como mensagem WhatsApp separada.
+
+### 17.3 Simulação de Comportamento Humano
+
+**Arquivos:** [app/services/whatsapp.py](app/services/whatsapp.py) + [app/api/v1/routes/webhooks.py](app/api/v1/routes/webhooks.py)
+
+Sequência por burst respondido:
+1. **Marcação como lida** (`mark_messages_as_read`) — blue ticks antes de qualquer digitação.
+2. Por cada parte da resposta:
+   - `send_presence("composing")` — "digitando…" no WhatsApp do paciente.
+   - `asyncio.sleep(typing_delay_seconds(parte))` — pausa proporcional ao tamanho.
+   - `send_text_message()` — envia a parte.
+   - `_save_outbound()` — salva como `Message(OUTBOUND)` separada no banco.
+
+`typing_delay_seconds(text)`:
+```
+base = clamp(len(text) / TYPING_CHARS_PER_SECOND, TYPING_MIN_SECONDS, TYPING_MAX_SECONDS)
+delay = base × uniform(1 - TYPING_JITTER, 1 + TYPING_JITTER)
+```
+Padrão: 25 cps, 1.2–6.0 s, ±15% jitter.
+
+- `send_presence` e `mark_messages_as_read` são **best-effort**: swallam qualquer exceção (log `warning`), nunca abortam o envio.
+- Se `TYPING_SIMULATION_ENABLED=false`, a presença não é enviada mas o delay ainda ocorre (desligar `MESSAGE_BATCHING_ENABLED` também é recomendado em dev para não bloquear testes).
+- `READ_RECEIPT_ENABLED=false` pula a marcação como lida.
+
+### 17.4 Ponto de entrada — `_generate_and_send`
+
+Função em [webhooks.py](app/api/v1/routes/webhooks.py) chamada pelo batcher após a janela de debounce:
+
+```
+1. Recarrega Contact do banco (ai_paused pode ter mudado durante a espera)
+2. _collect_unanswered(db, tenant_id, contact_id) → todas as inbound desde o último outbound
+3. Combina textos + _latest_media (decodifica data URI do campo media_url)
+4. generate_reply() → commit das tool writes (ex.: create_appointment)
+5. mark_messages_as_read (best-effort)
+6. Para cada parte em split_reply(reply_text):
+   send_presence → sleep(typing_delay) → send_text_message → _save_outbound
+```
+
+### 17.5 Variáveis de ambiente
+
+Todas opcionais (defaults já ativam o comportamento humanizado):
+
+| Variável | Default | Descrição |
+|---|---|---|
+| `MESSAGE_BATCHING_ENABLED` | `true` | Debounce de burst de mensagens |
+| `BATCH_WINDOW_MIN_SECONDS` | `8.0` | Mínimo da janela de debounce |
+| `BATCH_WINDOW_MAX_SECONDS` | `10.0` | Máximo da janela de debounce |
+| `RESPONSE_SPLIT_ENABLED` | `true` | Fallback de split por tamanho |
+| `RESPONSE_SPLIT_MAX_CHARS` | `320` | Limite de caracteres para o fallback |
+| `TYPING_SIMULATION_ENABLED` | `true` | Envia "digitando…" antes de cada parte |
+| `TYPING_CHARS_PER_SECOND` | `25.0` | Velocidade de digitação simulada |
+| `TYPING_MIN_SECONDS` | `1.2` | Delay mínimo por parte |
+| `TYPING_MAX_SECONDS` | `6.0` | Delay máximo por parte |
+| `TYPING_JITTER` | `0.15` | Variação aleatória ±15% |
+| `READ_RECEIPT_ENABLED` | `true` | Marcar como lida (blue ticks) |
+
+### 17.6 Verificação
+
+- ✅ `venv\Scripts\python.exe -m compileall -q app` — nenhum erro
+- ✅ `python -c "import app.main"` — boot completo OK
+- ✅ 7 testes inline do humanizer (split por marcador, fallback por tamanho, delay com jitter, batch_window)
+- ✅ 3 testes async do batcher (debounce reseta, flush imediato, disabled → imediato)
+- ⚠️ `send_presence`/`mark_messages_as_read` validados contra a spec da Evolution API v2; não testados contra instância real — best-effort garante que falha não impede a resposta
