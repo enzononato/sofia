@@ -42,9 +42,13 @@ _typing_until: dict[str, float] = {}
 
 
 def mark_typing(key: str, hold_seconds: float) -> None:
-    """Record that a contact is actively typing; the debounce will wait for them
-    to stop (capped) before replying. Refreshed on each composing/recording event."""
-    _typing_until[key] = time.monotonic() + hold_seconds
+    """Record that a contact is actively composing; the debounce will wait for them
+    to stop (capped) before replying. Refreshed on each composing/recording/paused
+    event. Never shortens an existing hold — extends to the later deadline."""
+    deadline = time.monotonic() + hold_seconds
+    current = _typing_until.get(key)
+    if current is None or deadline > current:
+        _typing_until[key] = deadline
 
 
 def clear_typing(key: str) -> None:

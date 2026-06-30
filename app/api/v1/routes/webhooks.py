@@ -222,15 +222,22 @@ def _typing_key(tenant_id: uuid.UUID, phone: str) -> str:
     return f"{tenant_id}:{phone}"
 
 
-# Evolution presence states that mean "the contact is actively composing a message".
-_TYPING_STATES = {"composing", "recording"}
+# Evolution presence states that mean "the contact is still composing a message".
+# 'paused' is included on purpose: WhatsApp emits it when the user stops typing to
+# think — they usually haven't sent yet, so we must keep waiting (treating it as a
+# release was firing the reply mid-composition).
+_TYPING_STATES = {"composing", "recording", "paused"}
+# Only an explicit "gone offline" releases the hold. 'available' is intentionally
+# NOT a release: WhatsApp emits it right after 'paused', which would prematurely
+# free the hold while the contact is still mid-message.
+_RELEASE_STATES = {"unavailable"}
 
 
 def _handle_presence_update(tenant: Tenant, data: dict, request_id: str | None) -> None:
     """
     Translate an Evolution presence.update into the batcher's typing registry.
-    'composing'/'recording' → hold the reply; anything else (paused/available/
-    unavailable) → release the hold. Pure in-memory, no I/O.
+    composing/recording/paused → hold the reply; unavailable → release; anything
+    else → leave the current hold untouched (let it expire). Pure in-memory, no I/O.
     """
     jid: str = data.get("id", "") or ""
     presences = data.get("presences", {}) or {}
@@ -247,12 +254,25 @@ def _handle_presence_update(tenant: Tenant, data: dict, request_id: str | None) 
     key = _typing_key(tenant.id, phone)
     if state in _TYPING_STATES:
         batcher.mark_typing(key, settings.TYPING_HOLD_SECONDS)
-        logger.debug(
-            "presence_typing",
-            extra={"request_id": request_id, "tenant_id": str(tenant.id), "phone": phone, "state": state},
-        )
-    else:
+        action = "hold"
+    elif state in _RELEASE_STATES:
         batcher.clear_typing(key)
+        action = "release"
+    else:
+        action = "ignore"
+
+    # Logged at INFO (not DEBUG) so presence delivery is observable in production
+    # without flipping LOG_LEVEL — key for confirming the provider sends these.
+    logger.info(
+        "presence_update",
+        extra={
+            "request_id": request_id,
+            "tenant_id": str(tenant.id),
+            "phone": phone,
+            "state": state or "(empty)",
+            "action": action,
+        },
+    )
 
 
 async def _process_inbound_message(tenant: Tenant, data: dict, request_id: str | None) -> None:

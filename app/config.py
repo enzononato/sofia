@@ -76,7 +76,7 @@ class Settings(BaseSettings):
     # the whole burst like a human would. Requires the webhook to subscribe to
     # PRESENCE_UPDATE; degrades to plain debounce if the provider never sends it.
     PRESENCE_TYPING_ENABLED: bool = True
-    TYPING_HOLD_SECONDS: float = 8.0        # a composing/recording event keeps us waiting this long
+    TYPING_HOLD_SECONDS: float = 12.0       # a composing/recording/paused event keeps us waiting this long
     TYPING_MAX_HOLD_SECONDS: float = 45.0   # absolute cap so a stuck "typing" never hangs the reply
     TYPING_POLL_SECONDS: float = 1.0        # how often we re-check the typing flag while holding
 
