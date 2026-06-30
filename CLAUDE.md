@@ -77,11 +77,13 @@ Three layered behaviors, all in `app/services/`, all single-worker (same constra
 
 1. **Message batching** (`message_batcher.py`): asyncio debounce registry keyed by `contact_id`. `schedule()` cancels any pending timer and starts a new one (8–10 s random window, `BATCH_WINDOW_MIN/MAX_SECONDS`). When the timer fires, `_generate_and_send()` re-reads **all unanswered inbound messages** from the DB and replies once to the whole burst. Media messages call `flush()` instead, which runs immediately.
 
+   **Presence-aware hold**: the webhook subscribes to Evolution `PRESENCE_UPDATE` (events list in `whatsapp_instance.py`). `_handle_presence_update()` in `webhooks.py` feeds a typing registry keyed by `{tenant_id}:{phone}` (`mark_typing`/`clear_typing`). After the debounce window elapses, `_debounced_run` keeps waiting while the contact is still `composing`/`recording` (capped by `TYPING_MAX_HOLD_SECONDS`), so Sofia answers the whole burst instead of each fragment. Degrades to plain debounce if the provider never sends presence events. Toggle via `PRESENCE_TYPING_ENABLED`. **Re-provisioning the webhook events requires the tenant to reconnect WhatsApp** (the events list is re-applied on connect via `set_webhook`).
+
 2. **Partitioned replies** (`humanizer.py` → `split_reply()`): AI is instructed (via `DEFAULT_SYSTEM_PROMPT`) to separate parts with `[[BREAK]]`. The function splits on this marker first; if absent and the text exceeds `RESPONSE_SPLIT_MAX_CHARS` (320 chars), it falls back to paragraph/sentence splitting. Always returns `list[str]`.
 
 3. **Human behavior simulation** (`whatsapp.py` + `webhooks.py`): before replying, `mark_messages_as_read()` sends blue ticks (best-effort, swallows errors). Then for each part: `send_presence("composing")` → `asyncio.sleep(typing_delay_seconds(part))` → `send_text_message()` → `_save_outbound()`. Typing delay is proportional to part length / `TYPING_CHARS_PER_SECOND`, clamped to `[TYPING_MIN_SECONDS, TYPING_MAX_SECONDS]`, with ±`TYPING_JITTER` (15%) random variation.
 
-All three behaviors can be disabled independently via env flags (`MESSAGE_BATCHING_ENABLED`, `RESPONSE_SPLIT_ENABLED`, `TYPING_SIMULATION_ENABLED`, `READ_RECEIPT_ENABLED`). Best-effort functions (`send_presence`, `mark_messages_as_read`) must never raise — they log a warning and return.
+All behaviors can be disabled independently via env flags (`MESSAGE_BATCHING_ENABLED`, `PRESENCE_TYPING_ENABLED`, `RESPONSE_SPLIT_ENABLED`, `TYPING_SIMULATION_ENABLED`, `READ_RECEIPT_ENABLED`). Best-effort functions (`send_presence`, `mark_messages_as_read`) must never raise — they log a warning and return.
 
 Scheduling modes in `ai_config.scheduling_mode`: `capacity` (N simultaneous per clinic) or `per_professional` (per-professional availability).
 

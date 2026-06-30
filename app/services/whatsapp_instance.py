@@ -51,7 +51,7 @@ async def create_or_fetch_instance(tenant_slug: str, webhook_secret: str) -> str
                     "enabled": True,
                     "url": webhook_url,
                     "headers": {"X-Webhook-Secret": webhook_secret},
-                    "events": ["MESSAGES_UPSERT", "CONNECTION_UPDATE"],
+                    "events": ["MESSAGES_UPSERT", "CONNECTION_UPDATE", "PRESENCE_UPDATE"],
                 },
             },
         )
@@ -96,7 +96,7 @@ async def set_webhook(instance_name: str, webhook_secret: str, tenant_slug: str)
                     "enabled": True,
                     "url": webhook_url,
                     "headers": {"X-Webhook-Secret": webhook_secret},
-                    "events": ["MESSAGES_UPSERT", "CONNECTION_UPDATE"],
+                    "events": ["MESSAGES_UPSERT", "CONNECTION_UPDATE", "PRESENCE_UPDATE"],
                 }
             },
         )

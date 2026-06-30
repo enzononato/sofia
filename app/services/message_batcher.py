@@ -22,6 +22,7 @@ already persisted in Phase 1 — only the auto-reply is skipped.
 
 import asyncio
 import logging
+import time
 import uuid
 from typing import Awaitable, Callable
 
@@ -35,6 +36,33 @@ WorkFn = Callable[[], Awaitable[None]]
 # contact_id -> sleeper task
 _pending: dict[uuid.UUID, asyncio.Task] = {}
 
+# typing_key (e.g. "{tenant_id}:{phone}") -> monotonic deadline until which the
+# contact is considered "still typing". Fed by PRESENCE_UPDATE webhook events.
+_typing_until: dict[str, float] = {}
+
+
+def mark_typing(key: str, hold_seconds: float) -> None:
+    """Record that a contact is actively typing; the debounce will wait for them
+    to stop (capped) before replying. Refreshed on each composing/recording event."""
+    _typing_until[key] = time.monotonic() + hold_seconds
+
+
+def clear_typing(key: str) -> None:
+    """Contact stopped typing / went available — drop any hold."""
+    _typing_until.pop(key, None)
+
+
+def _is_typing(key: str | None) -> bool:
+    if not key:
+        return False
+    until = _typing_until.get(key)
+    if until is None:
+        return False
+    if until <= time.monotonic():
+        _typing_until.pop(key, None)
+        return False
+    return True
+
 
 def _cancel_existing(contact_id: uuid.UUID) -> None:
     task = _pending.pop(contact_id, None)
@@ -42,9 +70,22 @@ def _cancel_existing(contact_id: uuid.UUID) -> None:
         task.cancel()
 
 
-async def _debounced_run(contact_id: uuid.UUID, work: WorkFn, delay: float) -> None:
+async def _debounced_run(
+    contact_id: uuid.UUID, work: WorkFn, delay: float, typing_key: str | None
+) -> None:
     try:
         await asyncio.sleep(delay)
+
+        # Presence-aware hold: if the contact is still typing (composing/recording
+        # events keep refreshing the flag), wait for them to stop before replying,
+        # so Sofia answers the whole burst — like a human would. Capped so a stuck
+        # "typing" state can never hang the reply indefinitely.
+        if settings.PRESENCE_TYPING_ENABLED and _is_typing(typing_key):
+            hold_started = time.monotonic()
+            while _is_typing(typing_key):
+                if time.monotonic() - hold_started > settings.TYPING_MAX_HOLD_SECONDS:
+                    break
+                await asyncio.sleep(settings.TYPING_POLL_SECONDS)
     except asyncio.CancelledError:
         # Superseded by a newer message — that newer schedule owns the reply.
         return
@@ -60,12 +101,15 @@ async def _debounced_run(contact_id: uuid.UUID, work: WorkFn, delay: float) -> N
         logger.exception("batch_work_failed", extra={"contact_id": str(contact_id)})
 
 
-def schedule(contact_id: uuid.UUID, work: WorkFn) -> None:
+def schedule(contact_id: uuid.UUID, work: WorkFn, typing_key: str | None = None) -> None:
     """
     Start (or restart) the debounce window for a contact. When the window
-    elapses without a new message, `work` runs once.
+    elapses without a new message (and the contact isn't actively typing),
+    `work` runs once.
 
-    If batching is disabled, `work` is dispatched immediately (no debounce).
+    `typing_key` ties this debounce to PRESENCE_UPDATE events so the reply is
+    held while the contact keeps typing. If batching is disabled, `work` is
+    dispatched immediately (no debounce).
     """
     if not settings.MESSAGE_BATCHING_ENABLED:
         asyncio.create_task(_run_now(contact_id, work))
@@ -73,7 +117,7 @@ def schedule(contact_id: uuid.UUID, work: WorkFn) -> None:
 
     _cancel_existing(contact_id)
     delay = batch_window_seconds()
-    task = asyncio.create_task(_debounced_run(contact_id, work, delay))
+    task = asyncio.create_task(_debounced_run(contact_id, work, delay, typing_key))
     _pending[contact_id] = task
     logger.debug(
         "batch_scheduled", extra={"contact_id": str(contact_id), "delay_s": round(delay, 2)}

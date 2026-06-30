@@ -98,6 +98,24 @@ async def whatsapp_webhook(
             )
         return {"received": True}
 
+    if event == "presence.update":
+        # The contact's typing state. While they're "composing"/"recording" we
+        # hold Sofia's reply (see message_batcher) so she answers the whole burst
+        # once they stop — instead of replying to each fragment.
+        async with AsyncSessionLocal() as db:
+            tenant = await _resolve_tenant_or_none(db, tenant_slug)
+        if tenant is None:
+            return {"received": True}
+
+        expected_secret = (tenant.settings or {}).get("whatsapp", {}).get("webhook_secret")
+        if expected_secret and x_webhook_secret != expected_secret:
+            # Presence is non-sensitive and high-frequency — ignore quietly on a
+            # bad secret rather than raising (avoids 401-spam in the logs).
+            return {"received": True}
+
+        _handle_presence_update(tenant, body.get("data", {}), rid)
+        return {"received": True}
+
     if event != "messages.upsert":
         logger.info(
             "webhook_event_ignored",
@@ -197,6 +215,44 @@ def _detect_media(message_obj: dict) -> tuple[str, dict] | None:
         if key in message_obj and isinstance(message_obj[key], dict):
             return kind, message_obj[key]
     return None
+
+
+def _typing_key(tenant_id: uuid.UUID, phone: str) -> str:
+    """Stable key tying a contact's PRESENCE_UPDATE state to their pending batch."""
+    return f"{tenant_id}:{phone}"
+
+
+# Evolution presence states that mean "the contact is actively composing a message".
+_TYPING_STATES = {"composing", "recording"}
+
+
+def _handle_presence_update(tenant: Tenant, data: dict, request_id: str | None) -> None:
+    """
+    Translate an Evolution presence.update into the batcher's typing registry.
+    'composing'/'recording' → hold the reply; anything else (paused/available/
+    unavailable) → release the hold. Pure in-memory, no I/O.
+    """
+    jid: str = data.get("id", "") or ""
+    presences = data.get("presences", {}) or {}
+    entry = presences.get(jid)
+    if entry is None and presences:
+        # Some payloads key by a normalized JID — fall back to the first entry.
+        entry = next(iter(presences.values()), {})
+    state = (entry or {}).get("lastKnownPresence", "")
+
+    phone = jid.replace("@s.whatsapp.net", "").replace("@c.us", "")
+    if not phone:
+        return
+
+    key = _typing_key(tenant.id, phone)
+    if state in _TYPING_STATES:
+        batcher.mark_typing(key, settings.TYPING_HOLD_SECONDS)
+        logger.debug(
+            "presence_typing",
+            extra={"request_id": request_id, "tenant_id": str(tenant.id), "phone": phone, "state": state},
+        )
+    else:
+        batcher.clear_typing(key)
 
 
 async def _process_inbound_message(tenant: Tenant, data: dict, request_id: str | None) -> None:
@@ -420,7 +476,7 @@ async def _process_inbound_message(tenant: Tenant, data: dict, request_id: str |
         if has_media:
             await batcher.flush(contact_id, _work)
         else:
-            batcher.schedule(contact_id, _work)
+            batcher.schedule(contact_id, _work, typing_key=_typing_key(tenant.id, phone))
 
     except Exception:
         logger.exception("webhook_processing_error", extra=log_ctx)

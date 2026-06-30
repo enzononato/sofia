@@ -71,6 +71,15 @@ class Settings(BaseSettings):
     # Read receipt: mark the patient's messages as read before replying.
     READ_RECEIPT_ENABLED: bool = True
 
+    # Presence-aware waiting: hold Sofia's reply while the contact is actively
+    # "typing" (Evolution PRESENCE_UPDATE = composing/recording), so she answers
+    # the whole burst like a human would. Requires the webhook to subscribe to
+    # PRESENCE_UPDATE; degrades to plain debounce if the provider never sends it.
+    PRESENCE_TYPING_ENABLED: bool = True
+    TYPING_HOLD_SECONDS: float = 8.0        # a composing/recording event keeps us waiting this long
+    TYPING_MAX_HOLD_SECONDS: float = 45.0   # absolute cap so a stuck "typing" never hangs the reply
+    TYPING_POLL_SECONDS: float = 1.0        # how often we re-check the typing flag while holding
+
     # ── Evolution API (provider-managed — credentials never exposed to tenants) ─
     EVOLUTION_API_URL: Optional[str] = None
     EVOLUTION_API_KEY: Optional[str] = None
