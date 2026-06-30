@@ -96,11 +96,14 @@ _MEDIA_LABELS = {
 }
 
 
-def _history_text_for(msg: Message) -> str:
+def _history_text_for(msg: Message) -> str | None:
     """
     Text representation of a past message for the Gemini history. Media turns
     become a short marker (we never re-send historical media bytes) so the AI
     keeps context without the prompt exploding to multi-MB.
+
+    Returns None for messages with no usable text (caller must skip them to
+    avoid passing Part(text=None) to the Gemini API, which causes INVALID_ARGUMENT).
     """
     media_type = getattr(msg, "media_type", None)
     if media_type:
@@ -108,7 +111,7 @@ def _history_text_for(msg: Message) -> str:
         if msg.content:
             return f"[{label}: {msg.content}]"
         return f"[{label}]"
-    return msg.content
+    return msg.content or None
 
 
 async def generate_followup_message(tenant: Tenant, contact: Contact) -> str | None:
@@ -194,8 +197,12 @@ async def generate_reply(
     # for old turns — only the current turn carries inline media.
     contents: list[types.Content] = []
     for msg in history:
-        role = "user" if msg.direction == MessageDirection.INBOUND else "model"
         text_repr = _history_text_for(msg)
+        if not text_repr:
+            # Skip messages with no usable text — Part(text=None/"") is rejected
+            # by the Gemini API with INVALID_ARGUMENT.
+            continue
+        role = "user" if msg.direction == MessageDirection.INBOUND else "model"
         contents.append(types.Content(role=role, parts=[types.Part(text=text_repr)]))
 
     # Current user turn — multimodal if media is present
