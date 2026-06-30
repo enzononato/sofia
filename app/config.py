@@ -41,7 +41,7 @@ class Settings(BaseSettings):
 
     # ── AI / Gemini ──────────────────────────────────────────────────────────
     GEMINI_API_KEY: Optional[str] = None
-    DEFAULT_AI_MODEL: str = "gemini-2.0-flash"
+    DEFAULT_AI_MODEL: str = "gemini-2.5-flash"
     AI_HISTORY_LIMIT: int = 20
 
     # ── Conversation humanization (batching, partitioned replies, typing) ─────
