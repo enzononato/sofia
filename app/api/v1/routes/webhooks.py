@@ -304,6 +304,9 @@ def _handle_presence_update(tenant: Tenant, data: dict, request_id: str | None) 
             "phone": phone,
             "state": state or "(empty)",
             "action": action,
+            # Dump the full event object so the real presence-state field
+            # (composing/available/…) can be identified and wired up.
+            "event_obj": str(ev)[:300] if action == "ignore" else None,
         },
     )
 
