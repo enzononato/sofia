@@ -114,8 +114,10 @@ async def whatsapp_webhook(
         return {"received": True}
 
     # ── Contact presence / typing ────────────────────────────────────────────
+    # uazapiGO carries the presence payload at the top level (`type`/`event`),
+    # not under a `data`/`presence` sub-key, so pass the whole body through.
     if event == "presence":
-        _handle_presence_update(tenant, data, rid)
+        _handle_presence_update(tenant, body, rid)
         return {"received": True}
 
     # ── Inbound messages ─────────────────────────────────────────────────────
@@ -246,11 +248,20 @@ def _handle_presence_update(tenant: Tenant, data: dict, request_id: str | None) 
     defensively and log the raw keys at INFO for the first live events.
     """
     raw = data if isinstance(data, dict) else {}
-    ident = str(raw.get("chatid") or raw.get("sender") or raw.get("id") or raw.get("number") or "")
+    # uazapiGO nests the presence detail under `event` (an object) with the
+    # contact in `chatid`/`id` and the state in `type`/`presence`. Fall back to
+    # the top-level `type`/`event` scalars for other providers/shapes.
+    ev = raw.get("event") if isinstance(raw.get("event"), dict) else {}
+    ident = str(
+        ev.get("chatid") or ev.get("id") or ev.get("sender")
+        or raw.get("chatid") or raw.get("sender") or raw.get("id") or raw.get("number")
+        or ""
+    )
     state = str(
-        raw.get("presence")
-        or raw.get("status")
-        or raw.get("lastKnownPresence")
+        ev.get("type") or ev.get("presence") or ev.get("status")
+        or (raw.get("type") if isinstance(raw.get("type"), str) else "")
+        or (raw.get("event") if isinstance(raw.get("event"), str) else "")
+        or raw.get("presence") or raw.get("status") or raw.get("lastKnownPresence")
         or ""
     ).lower()
 
@@ -260,6 +271,8 @@ def _handle_presence_update(tenant: Tenant, data: dict, request_id: str | None) 
         phone = _phone_from_jid(ident)
 
     if not phone:
+        # Log the raw VALUES (not just keys) so the uazapiGO presence shape can be
+        # nailed down from a live event and the parsing tightened if needed.
         logger.info(
             "presence_update",
             extra={
@@ -267,7 +280,8 @@ def _handle_presence_update(tenant: Tenant, data: dict, request_id: str | None) 
                 "tenant_id": str(tenant.id),
                 "state": state or "(empty)",
                 "action": "unmapped",
-                "keys": list(raw.keys())[:12],
+                "raw_type": str(raw.get("type"))[:80],
+                "raw_event": str(raw.get("event"))[:200],
             },
         )
         return

@@ -42,7 +42,7 @@ from app.services.ai_tools import CLINIC_TOOLS, execute_tool
 
 logger = logging.getLogger(__name__)
 
-MAX_TOOL_ITERATIONS = 5
+MAX_TOOL_ITERATIONS = 8
 
 DEFAULT_SYSTEM_PROMPT = """\
 Você é Sofia, secretária virtual desta clínica.
@@ -58,7 +58,8 @@ nunca deve precisar te lembrar ou repetir o pedido.
 - Nunca peça informações que você já tem via ferramentas ou via CONTEXTO DO PACIENTE.
 - Sempre que o paciente perguntar sobre serviços, procedimentos ou preços, chame \
 list_services para pegar os dados atuais — não confie no que foi dito antes na conversa, \
-pois a clínica pode ter cadastrado algo novo.
+pois a clínica pode ter cadastrado algo novo. Porém NÃO chame a mesma ferramenta duas \
+vezes seguidas com os mesmos argumentos: use o resultado que já recebeu e responda.
 - Não forneça diagnósticos médicos. Se o paciente descrever ou enviar fotos de sintomas, \
 oriente a buscar consulta presencial.
 - Quando receber áudio, imagem ou documento: descreva brevemente o que entendeu e \
@@ -325,7 +326,10 @@ async def generate_reply(
             )
         )
 
-    # Fallback if we exhausted iterations without a text response
+    # Exhausted the tool loop without a final text answer (the model kept calling
+    # tools). Instead of dumping a generic error on the patient, force ONE last
+    # completion with tools DISABLED so the model must answer in words using the
+    # tool results it has already gathered.
     logger.warning(
         "gemini_tool_loop_exhausted",
         extra={
@@ -334,4 +338,34 @@ async def generate_reply(
             "contact_id": str(contact.id),
         },
     )
+    try:
+        final_config = types.GenerateContentConfig(
+            system_instruction=system_prompt,
+            temperature=temperature,
+            max_output_tokens=max_output_tokens,
+            # No tools → the model cannot call a function and must produce text.
+        )
+        final_response = await client.aio.models.generate_content(
+            model=model,
+            contents=contents,
+            config=final_config,
+        )
+        forced_reply = (final_response.text or "").strip()
+        if forced_reply:
+            logger.info(
+                "gemini_forced_final_reply",
+                extra={
+                    "model": model,
+                    "tenant_id": str(tenant.id),
+                    "contact_id": str(contact.id),
+                    "reply_length": len(forced_reply),
+                },
+            )
+            return forced_reply, model
+    except Exception:
+        logger.exception(
+            "gemini_forced_final_failed",
+            extra={"model": model, "tenant_id": str(tenant.id), "contact_id": str(contact.id)},
+        )
+
     return "Desculpe, não consegui processar sua solicitação no momento. Tente novamente.", model
