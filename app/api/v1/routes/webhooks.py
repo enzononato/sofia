@@ -23,6 +23,7 @@ import base64
 import logging
 import time
 import uuid
+from datetime import datetime
 
 from fastapi import APIRouter, BackgroundTasks, Request, status
 from sqlalchemy import desc, select
@@ -194,6 +195,15 @@ def _typing_key(tenant_id: uuid.UUID, phone: str) -> str:
 # message. We remember lid→phone so a presence event keyed by LID (if UAZAPI ever
 # sends one) still resolves to the right contact. In-process only.
 _lid_to_phone: dict[str, str] = {}
+
+# contact_id -> created_at of the newest inbound message already handed to the AI.
+# In-process (single-worker), same lifecycle as the batcher registry. Closes a race:
+# a message that arrives WHILE Sofia is still "typing" the previous reply lands with
+# a timestamp EARLIER than the outbound (which is saved only after the typing delay),
+# so a naive "inbound newer than last outbound?" check would treat it as already
+# answered and silently drop it. Tracking the high-water mark of what the AI actually
+# read — not when the reply was sent — makes that late message correctly unanswered.
+_answered_watermark: dict[uuid.UUID, datetime] = {}
 
 
 # Presence states meaning "the contact is still composing a message". 'paused' is
@@ -577,6 +587,15 @@ async def _generate_and_send(
                 media=media,
             )
             await db.commit()
+
+            # Mark everything the AI just read as answered NOW (generation time),
+            # not when the reply finishes sending. Any message that arrives during
+            # the upcoming typing/send delay is newer than this mark, so its own
+            # debounce will pick it up instead of it being swallowed by this reply.
+            newest_answered = max(m.created_at for m in unanswered)
+            prev = _answered_watermark.get(contact_id)
+            if prev is None or newest_answered > prev:
+                _answered_watermark[contact_id] = newest_answered
         except Exception:
             await db.rollback()
             raise
@@ -649,26 +668,36 @@ def _decode_data_uri(media_url: str) -> bytes | None:
 async def _collect_unanswered(
     db: AsyncSession, tenant_id: uuid.UUID, contact_id: uuid.UUID
 ) -> list[Message]:
-    """All inbound messages received after the last outbound (the burst to answer),
-    oldest-first. If the AI never replied yet, returns every inbound message."""
-    last_outbound_at = await db.scalar(
-        select(Message.created_at)
-        .where(
-            Message.tenant_id == tenant_id,
-            Message.contact_id == contact_id,
-            Message.direction == MessageDirection.OUTBOUND,
+    """Inbound messages the AI hasn't answered yet (the burst to reply to),
+    oldest-first.
+
+    Cutoff preference:
+      1. The in-process watermark — created_at of the newest inbound already handed
+         to the AI. This is authoritative and immune to the typing-delay race (a
+         message arriving mid-reply is newer than the mark, so it stays unanswered).
+      2. Fallback to the last outbound's timestamp when there's no watermark yet
+         (e.g. right after a process restart), so we don't re-answer old bursts.
+    """
+    cutoff = _answered_watermark.get(contact_id)
+    if cutoff is None:
+        cutoff = await db.scalar(
+            select(Message.created_at)
+            .where(
+                Message.tenant_id == tenant_id,
+                Message.contact_id == contact_id,
+                Message.direction == MessageDirection.OUTBOUND,
+            )
+            .order_by(desc(Message.created_at))
+            .limit(1)
         )
-        .order_by(desc(Message.created_at))
-        .limit(1)
-    )
 
     stmt = select(Message).where(
         Message.tenant_id == tenant_id,
         Message.contact_id == contact_id,
         Message.direction == MessageDirection.INBOUND,
     )
-    if last_outbound_at is not None:
-        stmt = stmt.where(Message.created_at > last_outbound_at)
+    if cutoff is not None:
+        stmt = stmt.where(Message.created_at > cutoff)
     stmt = stmt.order_by(Message.created_at)
 
     result = await db.execute(stmt)
