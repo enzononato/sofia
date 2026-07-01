@@ -1,12 +1,13 @@
 """
 WhatsApp connection management for clinic owners.
 
-POST   /tenants/me/whatsapp/connect     — create Evolution instance + return QR code
+POST   /tenants/me/whatsapp/connect     — create/reuse UAZAPI instance + return QR code
 GET    /tenants/me/whatsapp/status      — poll connection state
 DELETE /tenants/me/whatsapp/disconnect  — delete instance and clear status
 
-Credentials (api_url, api_key) are global server-side env vars.
-The tenant only ever sees a QR code and a connection status.
+Credentials (server URL, admin token) are global server-side env vars. Each clinic
+has its own UAZAPI instance whose per-instance token is stored server-side; the
+tenant only ever sees a QR code and a connection status.
 """
 
 import secrets
@@ -25,6 +26,11 @@ router = APIRouter(prefix="/tenants/me/whatsapp", tags=["WhatsApp"])
 
 _OWNER_ADMIN = (UserRole.OWNER, UserRole.ADMIN)
 
+_NOT_CONFIGURED = (
+    "UAZAPI não está configurada no servidor. "
+    "Defina UAZAPI_URL e UAZAPI_ADMIN_TOKEN no arquivo .env."
+)
+
 
 async def _get_tenant(db: DBSession, tenant_id) -> Tenant:
     result = await db.execute(select(Tenant).where(Tenant.id == tenant_id))
@@ -41,12 +47,9 @@ async def connect_whatsapp(
     current_user: CurrentUser,
 ):
     """
-    Provision (or re-provision) the Evolution instance for this clinic and
-    return a QR code for the owner to scan with WhatsApp Business.
-
-    If the instance already exists in Evolution, the QR code refreshes.
-    If the phone is already connected, Evolution returns an error — this
-    endpoint surfaces it as a 422 with a friendly message.
+    Provision (or reuse) the UAZAPI instance for this clinic and return a QR code
+    for the owner to scan. The instance token is created once and reused on
+    subsequent reconnects (UAZAPI mints a new token on every create).
     """
     if current_user.role not in _OWNER_ADMIN:
         raise ForbiddenError("Only OWNER or ADMIN can connect WhatsApp.")
@@ -55,54 +58,61 @@ async def connect_whatsapp(
 
     wa_settings = (tenant.settings or {}).get("whatsapp", {})
     webhook_secret = wa_settings.get("webhook_secret") or secrets.token_urlsafe(32)
+    instance_token = wa_settings.get("token")
+    instance_id = wa_settings.get("instance")
 
     try:
-        instance_name = await wi.create_or_fetch_instance(tenant.slug, webhook_secret)
-    except RuntimeError as exc:
-        raise UnprocessableEntityError(
-            "Evolution API não está configurada no servidor. "
-            "Defina EVOLUTION_API_URL e EVOLUTION_API_KEY no arquivo .env."
-        )
+        # Create the instance only the first time; reuse the stored token after.
+        if not instance_token:
+            created = await wi.create_instance(f"clinic-{tenant.slug}")
+            instance_token = created.get("token") or (created.get("instance") or {}).get("token")
+            instance_id = (created.get("instance") or {}).get("id") or created.get("id")
+            if not instance_token:
+                raise UnprocessableEntityError("UAZAPI não retornou um token de instância.")
+
+        await wi.set_webhook(instance_token, tenant.slug, webhook_secret)
+        conn = await wi.connect_instance(instance_token)
+    except RuntimeError:
+        raise UnprocessableEntityError(_NOT_CONFIGURED)
     except httpx.ConnectError:
         raise UnprocessableEntityError(
-            "Não foi possível conectar à Evolution API. "
-            "Verifique se a URL está correta e se o servidor está acessível."
+            "Não foi possível conectar à UAZAPI. Verifique a URL e se o servidor está acessível."
         )
     except httpx.TimeoutException:
         raise UnprocessableEntityError(
-            "A Evolution API não respondeu a tempo. Tente novamente em alguns segundos."
+            "A UAZAPI não respondeu a tempo. Tente novamente em alguns segundos."
         )
     except httpx.HTTPStatusError as exc:
         raise UnprocessableEntityError(
-            f"Evolution API retornou erro {exc.response.status_code} ao criar instância. "
-            "Verifique as credenciais no .env."
+            f"UAZAPI retornou erro {exc.response.status_code} ao conectar. Verifique as credenciais."
         )
 
-    try:
-        qr_data = await wi.get_qr_code(instance_name)
-    except httpx.HTTPStatusError as exc:
-        if exc.response.status_code in (400, 409):
-            raise UnprocessableEntityError(
-                "WhatsApp is already connected. Disconnect first to get a new QR code."
-            )
-        raise
-    except httpx.ConnectError:
-        raise UnprocessableEntityError(
-            "Não foi possível conectar à Evolution API para gerar o QR Code."
-        )
+    inst = conn.get("instance") or {}
+    if instance_id is None:
+        instance_id = inst.get("id")
+    qr_code = inst.get("qrcode") or ""
+    pair_code = inst.get("paircode") or ""
+
+    already_connected = bool(conn.get("connected") or conn.get("loggedIn"))
+    status = "connected" if already_connected else "connecting"
 
     tenant.settings = {
         **(tenant.settings or {}),
         "whatsapp": {
             **wa_settings,
-            "instance": instance_name,
-            "status": "connecting",
+            "instance": instance_id,
+            "token": instance_token,
+            "status": status,
             "webhook_secret": webhook_secret,
         },
     }
     await db.commit()
 
-    return {"instance": instance_name, "qr_code": qr_data}
+    return {
+        "instance": instance_id,
+        "status": status,
+        "qr_code": {"code": qr_code, "pair_code": pair_code, "type": "qrcode"},
+    }
 
 
 @router.get("/status")
@@ -112,25 +122,29 @@ async def whatsapp_status(
     _: CurrentUser,
 ):
     """
-    Return the current WhatsApp connection status for this clinic.
-    Also refreshes the stored status from the live Evolution API state.
+    Return the current WhatsApp connection status, refreshing it from the live
+    UAZAPI instance state.
     """
     tenant = await _get_tenant(db, tenant_id)
 
     wa_settings = (tenant.settings or {}).get("whatsapp", {})
-    instance_name = wa_settings.get("instance")
+    instance_token = wa_settings.get("token")
+    instance_id = wa_settings.get("instance")
 
-    if not instance_name:
+    if not instance_token:
         return {"status": "not_configured", "instance": None}
 
     try:
-        raw_state = await wi.get_connection_state(instance_name)
-    except (httpx.HTTPStatusError, httpx.ConnectError, httpx.TimeoutException):
-        # Can't reach Evolution — return last known status from DB
-        return {"status": wa_settings.get("status", "unknown"), "instance": instance_name}
+        payload = await wi.get_status(instance_token)
+    except (httpx.HTTPStatusError, httpx.ConnectError, httpx.TimeoutException, RuntimeError):
+        # Can't reach UAZAPI — return last known status from DB
+        return {"status": wa_settings.get("status", "unknown"), "instance": instance_id}
 
-    state_map = {"open": "connected", "close": "disconnected", "connecting": "connecting"}
-    status = state_map.get(raw_state, "disconnected")
+    st = payload.get("status") or {}
+    if st.get("connected") or st.get("loggedIn"):
+        status = "connected"
+    else:
+        status = "disconnected"
 
     if wa_settings.get("status") != status:
         tenant.settings = {
@@ -139,7 +153,7 @@ async def whatsapp_status(
         }
         await db.commit()
 
-    return {"status": status, "instance": instance_name}
+    return {"status": status, "instance": instance_id}
 
 
 @router.delete("/disconnect", status_code=204)
@@ -149,7 +163,7 @@ async def disconnect_whatsapp(
     current_user: CurrentUser,
 ):
     """
-    Delete the Evolution instance and mark this clinic as disconnected.
+    Delete the UAZAPI instance and mark this clinic as disconnected.
     Requires OWNER or ADMIN role.
     """
     if current_user.role not in _OWNER_ADMIN:
@@ -158,17 +172,17 @@ async def disconnect_whatsapp(
     tenant = await _get_tenant(db, tenant_id)
 
     wa_settings = (tenant.settings or {}).get("whatsapp", {})
-    instance_name = wa_settings.get("instance")
+    instance_token = wa_settings.get("token")
 
-    if instance_name:
+    if instance_token:
         try:
-            await wi.delete_instance(instance_name)
+            await wi.delete_instance(instance_token)
         except (httpx.ConnectError, httpx.TimeoutException, RuntimeError, httpx.HTTPStatusError):
-            # Evolution API is unreachable or returned an error — still clear local state
+            # UAZAPI unreachable or errored — still clear local state
             pass
 
     tenant.settings = {
         **(tenant.settings or {}),
-        "whatsapp": {"instance": None, "status": "disconnected"},
+        "whatsapp": {"instance": None, "token": None, "status": "disconnected"},
     }
     await db.commit()

@@ -47,7 +47,7 @@ class Message(TenantScopedMixin, Base):
     # Text payload. For media messages, this holds the optional caption (empty string if none).
     content: Mapped[str] = mapped_column(Text, nullable=False)
 
-    # External ID from the WhatsApp provider (Evolution API message ID)
+    # External ID from the WhatsApp provider (UAZAPI messageid)
     whatsapp_message_id: Mapped[str | None] = mapped_column(String(255), nullable=True, index=True)
     # Which OpenAI model produced this reply (null for inbound messages)
     ai_model_used: Mapped[str | None] = mapped_column(String(100), nullable=True)

@@ -80,10 +80,14 @@ class Settings(BaseSettings):
     TYPING_MAX_HOLD_SECONDS: float = 45.0   # absolute cap so a stuck "typing" never hangs the reply
     TYPING_POLL_SECONDS: float = 1.0        # how often we re-check the typing flag while holding
 
-    # ── Evolution API (provider-managed — credentials never exposed to tenants) ─
-    EVOLUTION_API_URL: Optional[str] = None
-    EVOLUTION_API_KEY: Optional[str] = None
-    APP_BASE_URL: str = "http://localhost:8000"      # used to build webhook URLs sent to Evolution
+    # ── UAZAPI (provider-managed — credentials never exposed to tenants) ─────────
+    # One UAZAPI server hosts all clinics. UAZAPI_URL is the server base; the
+    # admin token creates/lists instances. Each clinic gets its own instance whose
+    # per-instance token (returned on create) is the auth used for that clinic's
+    # sends — stored in tenant.settings["whatsapp"]["token"] and never serialized.
+    UAZAPI_URL: Optional[str] = None
+    UAZAPI_ADMIN_TOKEN: Optional[str] = None
+    APP_BASE_URL: str = "http://localhost:8000"      # used to build webhook URLs sent to UAZAPI
 
     # ── Email (transactional, for staff invites) ─────────────────────────────
     # If RESEND_API_KEY is unset, invites still work: the API returns the invite
@@ -127,7 +131,14 @@ class Settings(BaseSettings):
     DEFAULT_PAGE_LIMIT: int = 50
     MAX_PAGE_LIMIT: int = 200
 
-    model_config = {"env_file": ".env", "env_file_encoding": "utf-8", "case_sensitive": True}
+    # extra="ignore": tolerate stray env vars (e.g. leftover EVOLUTION_* during the
+    # UAZAPI migration) instead of crashing on boot.
+    model_config = {
+        "env_file": ".env",
+        "env_file_encoding": "utf-8",
+        "case_sensitive": True,
+        "extra": "ignore",
+    }
 
     @model_validator(mode="after")
     def _validate_secrets(self) -> "Settings":

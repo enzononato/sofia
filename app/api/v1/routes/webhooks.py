@@ -1,16 +1,21 @@
 """
-WhatsApp webhook receiver (Evolution API).
+WhatsApp webhook receiver (UAZAPI).
 
-Endpoint: POST /api/v1/webhooks/whatsapp/{tenant_slug}
+Endpoint: POST /api/v1/webhooks/whatsapp/{tenant_slug}?token={webhook_secret}
 
-This route is intentionally PUBLIC — Evolution API sends requests from its own
-servers with no X-Tenant-ID header. Tenant isolation is enforced by:
+This route is intentionally PUBLIC — UAZAPI posts from its own servers with no
+X-Tenant-ID header. Tenant isolation is enforced by:
   1. Resolving the tenant from {tenant_slug} in the URL path.
-  2. Validating the per-tenant webhook_secret before any processing.
+  2. Validating the per-tenant webhook_secret (UAZAPI cannot send custom headers,
+     so the secret rides in the `?token=` query param of the webhook URL).
   3. Scoping every DB write with the resolved tenant_id.
 
+UAZAPI event shape: {"event": "messages"|"connection"|"presence", "instance": "...",
+"data": {...}}. Message data is FLAT (no nested Baileys structure) and already
+carries the resolved phone (`sender_pn`) alongside the LID (`sender_lid`).
+
 The handler returns 200 immediately and processes the message in a
-FastAPI BackgroundTask to avoid blocking Evolution API's retry logic.
+FastAPI BackgroundTask to avoid blocking UAZAPI's retry logic.
 """
 
 import asyncio
@@ -19,7 +24,7 @@ import logging
 import time
 import uuid
 
-from fastapi import APIRouter, BackgroundTasks, Header, HTTPException, Request, status
+from fastapi import APIRouter, BackgroundTasks, Request, status
 from sqlalchemy import desc, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -39,148 +44,76 @@ logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/webhooks", tags=["Webhooks"])
 
 
+def _instance_token(tenant: Tenant) -> str | None:
+    return (tenant.settings or {}).get("whatsapp", {}).get("token")
+
+
 @router.post("/whatsapp/{tenant_slug}", status_code=status.HTTP_200_OK)
 async def whatsapp_webhook(
     tenant_slug: str,
     request: Request,
     background_tasks: BackgroundTasks,
-    x_webhook_secret: str | None = Header(default=None, alias="X-Webhook-Secret"),
 ):
     """
-    Receive an Evolution API webhook event.
-    Validates the tenant + secret, then processes the message in the background.
-    Always returns 200 so Evolution API does not keep retrying.
+    Receive a UAZAPI webhook event. Validates the tenant + secret (query param),
+    then routes by event type. Always returns 200 so UAZAPI does not keep retrying.
     """
     rid = getattr(request.state, "request_id", None)
     body = await request.json()
-
-    raw_event = body.get("event", "")
-    event = raw_event.lower().replace("_", ".").replace("-", ".")
+    provided_secret = request.query_params.get("token")
+    event = (body.get("event") or "").lower()
+    data = body.get("data") or {}
 
     logger.debug(
         "webhook_received",
-        extra={"request_id": rid, "event": raw_event, "tenant_slug": tenant_slug},
+        extra={"request_id": rid, "event": event, "tenant_slug": tenant_slug},
     )
-
-    if event == "connection.update":
-        raw_state = body.get("data", {}).get("state", "close")
-        state_map = {"open": "connected", "close": "disconnected", "connecting": "connecting"}
-        new_status = state_map.get(raw_state, "disconnected")
-
-        async with AsyncSessionLocal() as db:
-            tenant = await _resolve_tenant_or_none(db, tenant_slug)
-            if tenant is None:
-                return {"received": True}
-
-            expected_secret = (tenant.settings or {}).get("whatsapp", {}).get("webhook_secret")
-            if expected_secret and x_webhook_secret != expected_secret:
-                logger.warning(
-                    "webhook_invalid_secret",
-                    extra={"request_id": rid, "tenant_id": str(tenant.id), "event": event},
-                )
-                raise HTTPException(
-                    status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid webhook secret."
-                )
-
-            wa = dict((tenant.settings or {}).get("whatsapp", {}))
-            if wa.get("status") != new_status:
-                wa["status"] = new_status
-                tenant.settings = {**(tenant.settings or {}), "whatsapp": dict(wa)}
-                await db.commit()
-            logger.info(
-                "whatsapp_connection_update",
-                extra={
-                    "request_id": rid,
-                    "tenant_id": str(tenant.id),
-                    "state": raw_state,
-                    "status": new_status,
-                },
-            )
-        return {"received": True}
-
-    if event == "presence.update":
-        # The contact's typing state. While they're "composing"/"recording" we
-        # hold Sofia's reply (see message_batcher) so she answers the whole burst
-        # once they stop — instead of replying to each fragment.
-        async with AsyncSessionLocal() as db:
-            tenant = await _resolve_tenant_or_none(db, tenant_slug)
-        if tenant is None:
-            return {"received": True}
-
-        expected_secret = (tenant.settings or {}).get("whatsapp", {}).get("webhook_secret")
-        if expected_secret and x_webhook_secret != expected_secret:
-            # Presence is non-sensitive and high-frequency — ignore quietly on a
-            # bad secret rather than raising (avoids 401-spam in the logs).
-            return {"received": True}
-
-        _handle_presence_update(tenant, body.get("data", {}), rid)
-        return {"received": True}
-
-    if event != "messages.upsert":
-        logger.info(
-            "webhook_event_ignored",
-            extra={"request_id": rid, "event": raw_event, "tenant_slug": tenant_slug},
-        )
-        return {"received": True}
-
-    data = body.get("data", {})
-    key = data.get("key", {})
-
-    # ── Diagnostic: log raw payload shape so we can debug structure mismatches ──
-    logger.debug(
-        "webhook_raw_payload",
-        extra={
-            "request_id": rid,
-            "tenant_slug": tenant_slug,
-            "data_keys": list(data.keys()),
-            "key": key,
-            "fromMe": key.get("fromMe"),
-            "remoteJid": key.get("remoteJid", ""),
-            "pushName": data.get("pushName", ""),
-            "has_message": "message" in data,
-            "message_keys": list(data.get("message", {}).keys()) if isinstance(data.get("message"), dict) else str(type(data.get("message"))),
-        },
-    )
-
-    # Ignore messages sent by the clinic itself (avoid infinite loops)
-    if key.get("fromMe", False):
-        logger.debug(
-            "webhook_from_me_skipped",
-            extra={
-                "request_id": rid,
-                "tenant_slug": tenant_slug,
-                "remoteJid": key.get("remoteJid", ""),
-            },
-        )
-        return {"received": True}
 
     async with AsyncSessionLocal() as db:
         tenant = await _resolve_tenant_or_none(db, tenant_slug)
 
     if tenant is None:
-        logger.warning(
-            "webhook_unknown_tenant",
-            extra={"request_id": rid, "tenant_slug": tenant_slug},
-        )
+        logger.warning("webhook_unknown_tenant", extra={"request_id": rid, "tenant_slug": tenant_slug})
         return {"received": True}
 
     expected_secret = (tenant.settings or {}).get("whatsapp", {}).get("webhook_secret")
-    if expected_secret and x_webhook_secret != expected_secret:
+    if expected_secret and provided_secret != expected_secret:
         logger.warning(
             "webhook_invalid_secret",
-            extra={"request_id": rid, "tenant_id": str(tenant.id), "tenant_slug": tenant_slug},
+            extra={"request_id": rid, "tenant_id": str(tenant.id), "event": event},
         )
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid webhook secret."
-        )
+        return {"received": True}
 
-    # Ignore WhatsApp group messages when the tenant has ignore_groups enabled (default: True)
-    remote_jid: str = key.get("remoteJid", "")
-    ignore_groups: bool = (tenant.settings or {}).get("ignore_groups", True)
-    if ignore_groups and remote_jid.endswith("@g.us"):
+    # ── Connection state changes ─────────────────────────────────────────────
+    if event == "connection":
+        await _handle_connection_update(tenant, data, rid)
+        return {"received": True}
+
+    # ── Contact presence / typing ────────────────────────────────────────────
+    if event == "presence":
+        _handle_presence_update(tenant, data, rid)
+        return {"received": True}
+
+    # ── Inbound messages ─────────────────────────────────────────────────────
+    if event != "messages":
+        logger.info(
+            "webhook_event_ignored",
+            extra={"request_id": rid, "event": event, "tenant_slug": tenant_slug},
+        )
+        return {"received": True}
+
+    # Ignore our own outbound / API-sent messages (avoid loops)
+    if data.get("fromMe") or data.get("wasSentByApi"):
+        return {"received": True}
+
+    # Ignore groups when the tenant has ignore_groups enabled (default: True)
+    chatid = str(data.get("chatid") or "")
+    is_group = bool(data.get("isGroup")) or chatid.endswith("@g.us")
+    ignore_groups = (tenant.settings or {}).get("ignore_groups", True)
+    if ignore_groups and is_group:
         logger.info(
             "webhook_group_skipped",
-            extra={"request_id": rid, "tenant_id": str(tenant.id), "jid": remote_jid},
+            extra={"request_id": rid, "tenant_id": str(tenant.id), "chatid": chatid},
         )
         return {"received": True}
 
@@ -192,13 +125,6 @@ async def whatsapp_webhook(
     return {"received": True}
 
 
-_MEDIA_KIND_BY_KEY = {
-    "audioMessage": "audio",
-    "imageMessage": "image",
-    "videoMessage": "video",
-    "documentMessage": "document",
-}
-
 _MULTIMODAL_DISABLED_REPLY = {
     "audio": "Recebi seu áudio! No momento, só consigo responder mensagens de texto. Por favor, escreva sua mensagem. 😊",
     "image": "Recebi sua imagem! No momento, só consigo responder mensagens de texto. 😊",
@@ -206,84 +132,107 @@ _MULTIMODAL_DISABLED_REPLY = {
     "document": "Recebi seu documento! No momento, só consigo responder mensagens de texto. 😊",
 }
 
-_AUDIO_MAX_SECONDS = 90  # 1m30s
+
+def _phone_from_jid(jid: str) -> str:
+    """Strip a WhatsApp JID down to its number part (drops @s.whatsapp.net/@c.us/@lid)."""
+    if not jid:
+        return ""
+    return jid.split("@", 1)[0] if "@" in jid else jid
 
 
-def _detect_media(message_obj: dict) -> tuple[str, dict] | None:
-    """Returns (media_kind, sub_payload) for the first media key found, or None."""
-    for key, kind in _MEDIA_KIND_BY_KEY.items():
-        if key in message_obj and isinstance(message_obj[key], dict):
-            return kind, message_obj[key]
+def _uazapi_media_kind(message_type: str) -> str | None:
+    """Map a UAZAPI messageType to our media kind (image/audio/video/document),
+    or None for text/other. Substring match tolerates variants (e.g. 'ptt',
+    'ImageMessage')."""
+    mt = (message_type or "").lower()
+    if "sticker" in mt:
+        return "image"
+    if "image" in mt:
+        return "image"
+    if "video" in mt:
+        return "video"
+    if "audio" in mt or "ptt" in mt or "voice" in mt:
+        return "audio"
+    if "document" in mt:
+        return "document"
     return None
 
 
 def _typing_key(tenant_id: uuid.UUID, phone: str) -> str:
-    """Stable key tying a contact's PRESENCE_UPDATE state to their pending batch."""
+    """Stable key tying a contact's presence state to their pending batch."""
     return f"{tenant_id}:{phone}"
 
 
-# Newer WhatsApp delivers PRESENCE_UPDATE keyed by the contact's LID
-# (e.g. "107627602284569@lid") — a privacy identifier unrelated to their phone
-# number — while messages still arrive keyed by the phone. We learn the mapping
-# from inbound message payloads (which carry BOTH identifiers) so presence can be
-# resolved to the right contact. In-process only, consistent with the batcher.
+# UAZAPI delivers a contact's phone (`sender_pn`) and LID (`sender_lid`) on each
+# message. We remember lid→phone so a presence event keyed by LID (if UAZAPI ever
+# sends one) still resolves to the right contact. In-process only.
 _lid_to_phone: dict[str, str] = {}
 
 
-def _find_lid(obj, depth: int = 0) -> str | None:
-    """Recursively scan a webhook payload for a WhatsApp LID JID ("…@lid") and
-    return its numeric part, or None. Depth-bounded to stay cheap."""
-    if depth > 5:
-        return None
-    if isinstance(obj, str):
-        return obj.split("@", 1)[0] if obj.endswith("@lid") else None
-    if isinstance(obj, dict):
-        for value in obj.values():
-            found = _find_lid(value, depth + 1)
-            if found:
-                return found
-    elif isinstance(obj, list):
-        for value in obj:
-            found = _find_lid(value, depth + 1)
-            if found:
-                return found
-    return None
-
-
-# Evolution presence states that mean "the contact is still composing a message".
-# 'paused' is included on purpose: WhatsApp emits it when the user stops typing to
-# think — they usually haven't sent yet, so we must keep waiting (treating it as a
-# release was firing the reply mid-composition).
+# Presence states meaning "the contact is still composing a message". 'paused' is
+# included on purpose (WhatsApp emits it when the user stops to think but hasn't
+# sent yet) so we don't fire the reply mid-composition.
 _TYPING_STATES = {"composing", "recording", "paused"}
-# Only an explicit "gone offline" releases the hold. 'available' is intentionally
-# NOT a release: WhatsApp emits it right after 'paused', which would prematurely
-# free the hold while the contact is still mid-message.
+# Only an explicit "gone offline" releases the hold; 'available' follows 'paused'
+# and must NOT free it early.
 _RELEASE_STATES = {"unavailable"}
+
+
+async def _handle_connection_update(tenant: Tenant, data: dict, rid: str | None) -> None:
+    """Persist the WhatsApp connection status from a UAZAPI 'connection' event."""
+    raw = data if isinstance(data, dict) else {}
+    inst = raw.get("instance") if isinstance(raw.get("instance"), dict) else {}
+    connected = raw.get("connected")
+    if connected is None:
+        connected = (raw.get("status") or {}).get("connected") if isinstance(raw.get("status"), dict) else None
+    raw_status = (
+        (raw.get("status") if isinstance(raw.get("status"), str) else None)
+        or raw.get("state")
+        or inst.get("status")
+        or ("connected" if connected else "disconnected")
+    )
+    status_map = {"open": "connected", "close": "disconnected", "connecting": "connecting"}
+    new_status = status_map.get(str(raw_status), str(raw_status) if raw_status else "disconnected")
+    if new_status not in ("connected", "disconnected", "connecting"):
+        new_status = "connected" if connected else "disconnected"
+
+    async with AsyncSessionLocal() as db:
+        tenant = await _resolve_tenant_or_none(db, tenant.slug)
+        if tenant is None:
+            return
+        wa = dict((tenant.settings or {}).get("whatsapp", {}))
+        if wa.get("status") != new_status:
+            wa["status"] = new_status
+            tenant.settings = {**(tenant.settings or {}), "whatsapp": wa}
+            await db.commit()
+    logger.info(
+        "whatsapp_connection_update",
+        extra={"request_id": rid, "tenant_id": str(tenant.id), "status": new_status},
+    )
 
 
 def _handle_presence_update(tenant: Tenant, data: dict, request_id: str | None) -> None:
     """
-    Translate an Evolution presence.update into the batcher's typing registry.
+    Feed a UAZAPI 'presence' event into the batcher's typing registry.
     composing/recording/paused → hold the reply; unavailable → release; anything
-    else → leave the current hold untouched (let it expire). Pure in-memory, no I/O.
-    """
-    jid: str = data.get("id", "") or ""
-    presences = data.get("presences", {}) or {}
-    entry = presences.get(jid)
-    if entry is None and presences:
-        # Some payloads key by a normalized JID — fall back to the first entry.
-        entry = next(iter(presences.values()), {})
-    state = (entry or {}).get("lastKnownPresence", "")
+    else → leave the current hold untouched. Pure in-memory, no I/O.
 
-    # Resolve the phone: LID JIDs are mapped from prior inbound messages; plain
-    # phone JIDs are used directly. An unmapped LID means we haven't seen a
-    # message from that contact yet this process — nothing to hold.
-    if jid.endswith("@lid"):
-        phone = _lid_to_phone.get(jid.split("@", 1)[0])
-        resolution = "lid"
+    UAZAPI's presence payload field names are not fully documented, so we parse
+    defensively and log the raw keys at INFO for the first live events.
+    """
+    raw = data if isinstance(data, dict) else {}
+    ident = str(raw.get("chatid") or raw.get("sender") or raw.get("id") or raw.get("number") or "")
+    state = str(
+        raw.get("presence")
+        or raw.get("status")
+        or raw.get("lastKnownPresence")
+        or ""
+    ).lower()
+
+    if ident.endswith("@lid"):
+        phone = _lid_to_phone.get(ident.split("@", 1)[0])
     else:
-        phone = jid.replace("@s.whatsapp.net", "").replace("@c.us", "")
-        resolution = "jid"
+        phone = _phone_from_jid(ident)
 
     if not phone:
         logger.info(
@@ -291,9 +240,9 @@ def _handle_presence_update(tenant: Tenant, data: dict, request_id: str | None) 
             extra={
                 "request_id": request_id,
                 "tenant_id": str(tenant.id),
-                "jid": jid,
                 "state": state or "(empty)",
                 "action": "unmapped",
+                "keys": list(raw.keys())[:12],
             },
         )
         return
@@ -308,8 +257,6 @@ def _handle_presence_update(tenant: Tenant, data: dict, request_id: str | None) 
     else:
         action = "ignore"
 
-    # Logged at INFO (not DEBUG) so presence delivery is observable in production
-    # without flipping LOG_LEVEL — key for confirming the provider sends these.
     logger.info(
         "presence_update",
         extra={
@@ -318,7 +265,6 @@ def _handle_presence_update(tenant: Tenant, data: dict, request_id: str | None) 
             "phone": phone,
             "state": state or "(empty)",
             "action": action,
-            "resolution": resolution,
         },
     )
 
@@ -330,174 +276,132 @@ async def _process_inbound_message(tenant: Tenant, data: dict, request_id: str |
       Phase 2 (own transaction): fetch history → AI reply → save outbound → commit → send.
 
     Splitting transactions ensures the inbound message appears in the inbox without
-    waiting for the AI (~1-5 s). Tool writes from the AI share Phase 2's transaction
-    and are rolled back atomically with the outbound message on failure.
+    waiting for the AI. Tool writes from the AI share Phase 2's transaction and are
+    rolled back atomically with the outbound message on failure.
 
-    Multimodal: when message contains audio/image/video/document AND the tenant has
-    multimodal_enabled=true in ai_config, the bytes are downloaded from Evolution,
-    persisted as a data URI in media_url, and forwarded to Gemini as inline_data.
+    Multimodal: when the message is audio/image/video/document AND the tenant has
+    multimodal_enabled=true, the bytes are downloaded from UAZAPI, persisted as a
+    data URI in media_url, and forwarded to Gemini as inline_data.
     """
     log_ctx = {"request_id": request_id, "tenant_id": str(tenant.id)}
 
     try:
-        key = data.get("key", {})
-        message_obj = data.get("message", {})
+        # ── Identify the contact (UAZAPI gives resolved phone + LID) ──────────
+        sender_pn = str(data.get("sender_pn") or "")
+        chatid = str(data.get("chatid") or "")
+        sender = str(data.get("sender") or "")
+        phone = _phone_from_jid(sender_pn or chatid or sender)
+        push_name: str = data.get("senderName") or ""
+        message_id: str = str(data.get("messageid") or data.get("id") or "")
 
-        remote_jid: str = key.get("remoteJid", "")
-        phone = remote_jid.replace("@s.whatsapp.net", "").replace("@c.us", "")
-        push_name: str = data.get("pushName", "")
-        whatsapp_msg_id: str = key.get("id", "")
+        sender_lid = str(data.get("sender_lid") or "")
+        if sender_lid and phone:
+            _lid_to_phone[sender_lid.split("@", 1)[0]] = phone
 
-        # Learn this contact's LID→phone mapping so PRESENCE_UPDATE events (which
-        # arrive keyed by LID on newer WhatsApp) can be tied back to the phone.
-        lid = _find_lid(data)
-        if lid and phone and _lid_to_phone.get(lid) != phone:
-            _lid_to_phone[lid] = phone
-            logger.info(
-                "lid_mapped",
-                extra={"request_id": request_id, "tenant_id": str(tenant.id), "lid": lid, "phone": phone},
-            )
+        if not phone:
+            logger.info("webhook_no_phone", extra={**log_ctx})
+            return
 
-        msg_timestamp = data.get("messageTimestamp", 0)
-        is_historical = msg_timestamp > 0 and (time.time() - msg_timestamp) > 300
+        # UAZAPI messageTimestamp is in milliseconds.
+        ts_raw = data.get("messageTimestamp") or 0
+        ts_s = ts_raw / 1000 if ts_raw > 1_000_000_000_000 else ts_raw
+        is_historical = ts_s > 0 and (time.time() - ts_s) > 300
 
-        # Caption / text part of the message (may be empty when media-only)
-        caption = (
-            message_obj.get("conversation")
-            or message_obj.get("extendedTextMessage", {}).get("text")
-            or message_obj.get("imageMessage", {}).get("caption")
-            or message_obj.get("videoMessage", {}).get("caption")
-            or message_obj.get("documentMessage", {}).get("caption")
-            or ""
-        ).strip()
+        text = (data.get("text") or "").strip()
+        media_kind = _uazapi_media_kind(data.get("messageType", ""))
 
-        instance_name = (tenant.settings or {}).get("whatsapp", {}).get("instance")
+        instance_token = _instance_token(tenant)
         ai_cfg = tenant.ai_config or {}
         multimodal_enabled = bool(ai_cfg.get("multimodal_enabled", False))
 
-        media_info = _detect_media(message_obj)
-
-        # Defaults — populated below for the media path. The decoded bytes are no
-        # longer kept here: Phase 2 reconstructs media from the stored data URI.
         media_type: str | None = None
         media_mime_type: str | None = None
         media_size_bytes: int | None = None
         media_url: str | None = None
 
         # ── Pure text fast path ────────────────────────────────────────────
-        if media_info is None:
-            if not caption:
+        if media_kind is None:
+            if not text:
                 logger.info("webhook_non_text_ignored", extra={**log_ctx, "phone": phone})
                 return
-            content = caption
+            content = text
 
         # ── Media path ─────────────────────────────────────────────────────
         else:
-            kind, sub = media_info
-
-            # Multimodal disabled → polite refusal (skip for historical sync)
             if not multimodal_enabled:
-                if not is_historical and instance_name:
+                if not is_historical and instance_token:
                     await wa_service.send_text_message(
-                        instance_name=instance_name,
+                        instance_token=instance_token,
                         phone=phone,
-                        text=_MULTIMODAL_DISABLED_REPLY[kind],
+                        text=_MULTIMODAL_DISABLED_REPLY.get(media_kind, _MULTIMODAL_DISABLED_REPLY["document"]),
                     )
                     logger.info(
                         "webhook_media_refused_disabled",
-                        extra={**log_ctx, "phone": phone, "media_type": kind},
+                        extra={**log_ctx, "phone": phone, "media_type": media_kind},
                     )
                 else:
                     logger.info(
                         "webhook_media_ignored_historical",
-                        extra={**log_ctx, "phone": phone, "media_type": kind},
+                        extra={**log_ctx, "phone": phone, "media_type": media_kind},
                     )
                 return
 
-            # Audio length cap
-            if kind == "audio":
-                duration_s = sub.get("seconds")
-                if duration_s and duration_s > _AUDIO_MAX_SECONDS:
-                    if not is_historical and instance_name:
-                        await wa_service.send_text_message(
-                            instance_name=instance_name,
-                            phone=phone,
-                            text=(
-                                "Recebi seu áudio, mas ele está muito longo (máximo 1m30s). "
-                                "Por favor, envie um áudio mais curto ou escreva sua mensagem. 😊"
-                            ),
-                        )
-                    logger.info(
-                        "webhook_audio_too_long",
-                        extra={**log_ctx, "phone": phone, "duration_s": duration_s},
-                    )
-                    return
-
-            if not instance_name:
+            if not instance_token:
                 logger.error("webhook_no_instance_for_download", extra=log_ctx)
                 return
 
-            # Download bytes from Evolution
-            download = await wi.download_media_base64(instance_name, data)
+            download = await wi.download_media_base64(instance_token, message_id)
             if download is None:
                 logger.warning(
                     "webhook_media_download_giving_up",
-                    extra={**log_ctx, "phone": phone, "media_type": kind},
+                    extra={**log_ctx, "phone": phone, "media_type": media_kind},
                 )
                 return
 
             base64_data, mimetype, size_bytes = download
 
-            # File size cap — reject files > 20 MB (protects Gemini and DB)
             _MAX_MEDIA_BYTES = 20 * 1024 * 1024
             if size_bytes > _MAX_MEDIA_BYTES:
-                if not is_historical and instance_name:
-                    kind_label = {"audio": "áudio", "image": "imagem", "video": "vídeo", "document": "documento"}.get(kind, kind)
+                if not is_historical and instance_token:
+                    kind_label = {"audio": "áudio", "image": "imagem", "video": "vídeo", "document": "documento"}.get(media_kind, media_kind)
                     await wa_service.send_text_message(
-                        instance_name=instance_name,
+                        instance_token=instance_token,
                         phone=phone,
                         text=f"Recebi seu {kind_label}, mas ele é muito grande para processar (máximo 20 MB). Por favor, envie um arquivo menor. 😊",
                     )
                 logger.info(
                     "webhook_media_too_large",
-                    extra={**log_ctx, "phone": phone, "media_type": kind, "size_bytes": size_bytes},
+                    extra={**log_ctx, "phone": phone, "media_type": media_kind, "size_bytes": size_bytes},
                 )
                 return
 
-            media_type = kind
+            media_type = media_kind
             media_mime_type = mimetype
             media_size_bytes = size_bytes
             media_url = f"data:{mimetype};base64,{base64_data}"
-            # For documents, use the original filename as content when there is no caption
-            if kind == "document" and not caption:
-                content = sub.get("fileName") or ""
-            else:
-                content = caption
+            content = text  # caption (may be empty)
 
         # ── Phase 1: persist inbound immediately ─────────────────────────────
         async with AsyncSessionLocal() as db:
             try:
-                # Idempotency: Evolution may re-deliver the same event. Skip if we
-                # already stored this WhatsApp message id for this tenant.
-                if whatsapp_msg_id:
+                # Idempotency: UAZAPI may re-deliver. Skip if already stored.
+                if message_id:
                     dup = await db.scalar(
                         select(Message.id).where(
                             Message.tenant_id == tenant.id,
-                            Message.whatsapp_message_id == whatsapp_msg_id,
+                            Message.whatsapp_message_id == message_id,
                         )
                     )
                     if dup is not None:
                         logger.info(
                             "webhook_duplicate_skipped",
-                            extra={**log_ctx, "phone": phone, "whatsapp_message_id": whatsapp_msg_id},
+                            extra={**log_ctx, "phone": phone, "whatsapp_message_id": message_id},
                         )
                         return
 
-                contact = await _find_or_create_contact(db, tenant, phone, push_name, data=data)
+                contact = await _find_or_create_contact(db, tenant, phone, push_name)
                 ai_paused = contact.ai_paused
 
-                # CRM: record live inbound activity (powers re-engagement) and nudge
-                # a brand-new lead into "in_conversation". Skip for historical sync.
                 if not is_historical:
                     crm.mark_inbound(contact)
 
@@ -507,7 +411,7 @@ async def _process_inbound_message(tenant: Tenant, data: dict, request_id: str |
                     direction=MessageDirection.INBOUND,
                     channel=MessageChannel.WHATSAPP,
                     content=content,
-                    whatsapp_message_id=whatsapp_msg_id,
+                    whatsapp_message_id=message_id,
                     media_type=media_type,
                     media_mime_type=media_mime_type,
                     media_size_bytes=media_size_bytes,
@@ -524,7 +428,7 @@ async def _process_inbound_message(tenant: Tenant, data: dict, request_id: str |
         if is_historical:
             logger.info(
                 "webhook_historical_saved",
-                extra={**log_ctx, "phone": phone, "age_s": int(time.time() - msg_timestamp)},
+                extra={**log_ctx, "phone": phone, "age_s": int(time.time() - ts_s)},
             )
             return
 
@@ -532,14 +436,11 @@ async def _process_inbound_message(tenant: Tenant, data: dict, request_id: str |
             logger.info("webhook_ai_paused", extra={**log_ctx, "phone": phone, "contact_id": str(contact_id)})
             return
 
-        if not instance_name:
+        if not instance_token:
             logger.error("webhook_no_instance", extra=log_ctx)
             return
 
         # ── Phase 2 dispatch: debounce text bursts; flush media immediately ────
-        # The actual reply runs in _generate_and_send, which re-reads the
-        # unanswered messages from the DB — so it naturally covers every message
-        # accumulated during the debounce window.
         has_media = media_type is not None
 
         async def _work() -> None:
@@ -547,7 +448,7 @@ async def _process_inbound_message(tenant: Tenant, data: dict, request_id: str |
                 tenant=tenant,
                 contact_id=contact_id,
                 phone=phone,
-                instance_name=instance_name,
+                instance_token=instance_token,
                 request_id=request_id,
             )
 
@@ -564,7 +465,7 @@ async def _generate_and_send(
     tenant: Tenant,
     contact_id: uuid.UUID,
     phone: str,
-    instance_name: str,
+    instance_token: str,
     request_id: str | None,
 ) -> None:
     """
@@ -579,7 +480,6 @@ async def _generate_and_send(
     later WhatsApp delivery error never rolls back a booking the AI made.
     """
     log_ctx = {"request_id": request_id, "tenant_id": str(tenant.id), "contact_id": str(contact_id)}
-    remote_jid = f"{phone}@s.whatsapp.net"
 
     async with AsyncSessionLocal() as db:
         try:
@@ -588,7 +488,6 @@ async def _generate_and_send(
                 logger.warning("webhook_contact_missing", extra=log_ctx)
                 return
 
-            # The admin may have paused the AI during the debounce window.
             if contact.ai_paused:
                 logger.info("webhook_ai_paused_late", extra=log_ctx)
                 return
@@ -613,7 +512,6 @@ async def _generate_and_send(
                 db=db,
                 media=media,
             )
-            # Persist any tool writes (e.g. create_appointment) now.
             await db.commit()
         except Exception:
             await db.rollback()
@@ -621,7 +519,7 @@ async def _generate_and_send(
 
     # ── Read receipt before replying (best-effort) ───────────────────────────
     if settings.READ_RECEIPT_ENABLED and wa_ids:
-        await wa_service.mark_messages_as_read(instance_name, remote_jid, wa_ids)
+        await wa_service.mark_messages_as_read(instance_token, wa_ids)
 
     # ── Partitioned, human-paced delivery ────────────────────────────────────
     parts = humanizer.split_reply(reply_text)
@@ -630,9 +528,9 @@ async def _generate_and_send(
             continue
         if settings.TYPING_SIMULATION_ENABLED:
             delay = humanizer.typing_delay_seconds(part)
-            await wa_service.send_presence(instance_name, phone, "composing", int(delay * 1000))
+            await wa_service.send_presence(instance_token, phone, "composing", int(delay * 1000))
             await asyncio.sleep(delay)
-        await wa_service.send_text_message(instance_name=instance_name, phone=phone, text=part)
+        await wa_service.send_text_message(instance_token=instance_token, phone=phone, text=part)
         await _save_outbound(tenant.id, contact_id, part, model_used)
 
     logger.info(
@@ -721,7 +619,7 @@ async def _resolve_tenant_or_none(db: AsyncSession, slug: str) -> Tenant | None:
 
 
 async def _find_or_create_contact(
-    db: AsyncSession, tenant: Tenant, phone: str, push_name: str, data: dict = None
+    db: AsyncSession, tenant: Tenant, phone: str, push_name: str
 ) -> Contact:
     """
     Look up a Contact by phone within the tenant. Creates a new lead if not found.
@@ -733,10 +631,7 @@ async def _find_or_create_contact(
     contact = result.scalar_one_or_none()
 
     if contact is None:
-        data = data or {}
-        # Try to extract the saved contact name if available in the webhook, otherwise fallback to pushName
-        contact_name = data.get("contact", {}).get("name")
-        display_name = contact_name or push_name or phone
+        display_name = push_name or phone
 
         contact = Contact(
             tenant_id=tenant.id,
@@ -749,10 +644,9 @@ async def _find_or_create_contact(
         db.add(contact)
         await db.flush()
 
-        # Fetch profile picture concurrently in the background if possible, or wait for it
-        instance_name = (tenant.settings or {}).get("whatsapp", {}).get("instance")
-        if instance_name:
-            pic_url = await wi.fetch_profile_picture(instance_name, phone)
+        instance_token = _instance_token(tenant)
+        if instance_token:
+            pic_url = await wi.fetch_profile_picture(instance_token, phone)
             if pic_url:
                 contact.profile_picture_url = pic_url
                 db.add(contact)

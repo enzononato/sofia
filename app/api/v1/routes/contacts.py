@@ -180,22 +180,22 @@ async def send_manual_message(
 
     contact = await _get_or_404(db, contact_id, tenant_id)
 
-    # Resolve instance name from tenant settings
+    # Resolve the clinic's UAZAPI instance token from tenant settings
     tenant = await db.scalar(select(Tenant).where(Tenant.id == tenant_id))
-    instance_name = (tenant.settings or {}).get("whatsapp", {}).get("instance")
-    if not instance_name:
+    instance_token = (tenant.settings or {}).get("whatsapp", {}).get("token")
+    if not instance_token:
         raise ForbiddenError(
             "WhatsApp não está conectado. Conecte-se primeiro nas Configurações."
         )
 
-    # Send via Evolution API first
+    # Send via UAZAPI first
     await wa_service.send_text_message(
-        instance_name=instance_name,
+        instance_token=instance_token,
         phone=contact.phone,
         text=payload.content,
     )
 
-    # Save to database if Evolution API succeeds
+    # Save to database if the send succeeds
     msg = Message(
         tenant_id=tenant_id,
         contact_id=contact.id,
@@ -255,8 +255,8 @@ async def send_media_message(
     contact = await _get_or_404(db, contact_id, tenant_id)
 
     tenant = await db.scalar(select(Tenant).where(Tenant.id == tenant_id))
-    instance_name = (tenant.settings or {}).get("whatsapp", {}).get("instance")
-    if not instance_name:
+    instance_token = (tenant.settings or {}).get("whatsapp", {}).get("token")
+    if not instance_token:
         raise ForbiddenError(
             "WhatsApp não está conectado. Conecte-se primeiro nas Configurações."
         )
@@ -267,10 +267,10 @@ async def send_media_message(
     file_name = payload.get("file_name", "")
 
     await wa_service.send_media_message(
-        instance_name=instance_name,
+        instance_token=instance_token,
         phone=contact.phone,
         media_type=media_type,
-        media_url=media_data,
+        media=media_data,
         caption=caption,
         file_name=file_name,
     )

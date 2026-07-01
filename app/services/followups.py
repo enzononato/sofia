@@ -38,7 +38,8 @@ _MAX_REMINDER_HORIZON_HOURS = 72
 
 
 def _tenant_instance(tenant: Tenant) -> str | None:
-    return (tenant.settings or {}).get("whatsapp", {}).get("instance")
+    """The clinic's UAZAPI instance token (auth for outbound sends), or None."""
+    return (tenant.settings or {}).get("whatsapp", {}).get("token")
 
 
 def _followups_cfg(tenant: Tenant) -> dict:
@@ -117,7 +118,7 @@ async def run_appointment_reminders() -> None:
                         f"agendamento na {tenant.name}: {when}. Posso confirmar a sua presença?"
                     )
                     try:
-                        await wa_service.send_text_message(instance_name=instance, phone=contact.phone, text=text)
+                        await wa_service.send_text_message(instance_token=instance, phone=contact.phone, text=text)
                     except Exception:
                         logger.exception("reminder_send_failed", extra={"appointment_id": str(appt.id)})
                         break
@@ -181,7 +182,7 @@ async def run_reengagement() -> None:
                 if not message:
                     continue
                 try:
-                    await wa_service.send_text_message(instance_name=instance, phone=contact.phone, text=message)
+                    await wa_service.send_text_message(instance_token=instance, phone=contact.phone, text=message)
                 except Exception:
                     logger.exception("reengagement_send_failed", extra={"contact_id": str(contact.id)})
                     continue

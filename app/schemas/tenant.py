@@ -10,7 +10,7 @@ from app.models.tenant import TenantPlan
 # them, but once stored they stay server-side. `gemini_api_key` is deprecated
 # (the server's global key is always used now) but may exist in old rows.
 _SENSITIVE_AI_KEYS = {"gemini_api_key"}
-_SENSITIVE_WHATSAPP_KEYS = {"webhook_secret", "api_key", "api_url", "apikey"}
+_SENSITIVE_WHATSAPP_KEYS = {"webhook_secret", "api_key", "api_url", "apikey", "token"}
 
 
 def _scrub_dict(data: Any, drop_keys: set[str]) -> Any:
