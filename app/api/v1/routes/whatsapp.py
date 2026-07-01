@@ -10,17 +10,21 @@ has its own UAZAPI instance whose per-instance token is stored server-side; the
 tenant only ever sees a QR code and a connection status.
 """
 
+import logging
 import secrets
 
 import httpx
 from fastapi import APIRouter
 from sqlalchemy import select
+from sqlalchemy.orm import attributes as sa_attributes
 
 from app.api.deps import CurrentTenantId, CurrentUser, DBSession
 from app.core.errors import ForbiddenError, NotFoundError, UnprocessableEntityError
 from app.models.tenant import Tenant
 from app.models.user import UserRole
 from app.services import whatsapp_instance as wi
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/tenants/me/whatsapp", tags=["WhatsApp"])
 
@@ -40,6 +44,12 @@ async def _get_tenant(db: DBSession, tenant_id) -> Tenant:
     return tenant
 
 
+def _persist_wa_settings(tenant: Tenant, wa_settings: dict) -> None:
+    """Overwrite the whatsapp sub-key in tenant.settings and mark JSONB as dirty."""
+    tenant.settings = {**(tenant.settings or {}), "whatsapp": wa_settings}
+    sa_attributes.flag_modified(tenant, "settings")
+
+
 @router.post("/connect", status_code=200)
 async def connect_whatsapp(
     db: DBSession,
@@ -54,17 +64,24 @@ async def connect_whatsapp(
     if current_user.role not in _OWNER_ADMIN:
         raise ForbiddenError("Only OWNER or ADMIN can connect WhatsApp.")
 
-    tenant = await _get_tenant(db, tenant_id)
+    # SELECT FOR UPDATE serialises concurrent connect requests (double-click race):
+    # the second request blocks here until the first commits, then reads the already-
+    # saved token and skips the create entirely.
+    result = await db.execute(
+        select(Tenant).where(Tenant.id == tenant_id).with_for_update()
+    )
+    tenant = result.scalar_one_or_none()
+    if tenant is None:
+        raise NotFoundError("Tenant not found.")
 
     wa_settings = dict((tenant.settings or {}).get("whatsapp", {}))
     webhook_secret = wa_settings.get("webhook_secret") or secrets.token_urlsafe(32)
     instance_token = wa_settings.get("token")
     instance_id = wa_settings.get("instance")
 
-    # Step 1 — create the instance ONCE, and persist its token IMMEDIATELY. This is
-    # the only mutating/irreversible step, so we commit before the flakier connect
-    # step: otherwise any later error would drop the token and every retry (or a
-    # double-click) would mint a brand-new orphan instance on UAZAPI.
+    # ── Step 1 ── create the instance ONCE and persist its token IMMEDIATELY.
+    # This is the only irreversible step; we commit before the flakier connect
+    # call so that any later failure never causes a second orphan instance.
     if not instance_token:
         try:
             created = await wi.create_instance(f"clinic-{tenant.slug}")
@@ -78,11 +95,35 @@ async def connect_whatsapp(
             raise UnprocessableEntityError(
                 f"UAZAPI retornou erro {exc.response.status_code} ao criar a instância."
             )
+        except Exception as exc:
+            logger.error("uazapi_create_unexpected_error", extra={"error": str(exc)})
+            raise UnprocessableEntityError(f"Erro inesperado ao criar instância: {exc}")
 
-        instance_token = created.get("token") or (created.get("instance") or {}).get("token")
-        instance_id = (created.get("instance") or {}).get("id") or created.get("id")
+        logger.info(
+            "uazapi_create_response",
+            extra={"keys": list(created.keys()) if isinstance(created, dict) else type(created).__name__,
+                   "raw": str(created)[:500]},
+        )
+
+        try:
+            instance_token = (
+                created.get("token") or (created.get("instance") or {}).get("token")
+            )
+            instance_id = (created.get("instance") or {}).get("id") or created.get("id")
+        except (AttributeError, TypeError) as exc:
+            logger.error(
+                "uazapi_create_parse_error",
+                extra={"response": str(created)[:500], "error": str(exc)},
+            )
+            raise UnprocessableEntityError(
+                f"UAZAPI retornou formato inesperado. Resposta: {str(created)[:200]}"
+            )
+
         if not instance_token:
-            raise UnprocessableEntityError("UAZAPI não retornou um token de instância.")
+            logger.error("uazapi_create_no_token", extra={"response": str(created)[:500]})
+            raise UnprocessableEntityError(
+                f"UAZAPI não retornou um token de instância. Resposta: {str(created)[:200]}"
+            )
 
         wa_settings = {
             **wa_settings,
@@ -91,11 +132,19 @@ async def connect_whatsapp(
             "status": "connecting",
             "webhook_secret": webhook_secret,
         }
-        tenant.settings = {**(tenant.settings or {}), "whatsapp": wa_settings}
-        await db.commit()
+        _persist_wa_settings(tenant, wa_settings)
+        try:
+            await db.commit()
+        except Exception as exc:
+            logger.error("db_commit_after_create_failed", extra={"error": str(exc)})
+            await db.rollback()
+            raise UnprocessableEntityError(
+                "Erro ao salvar a instância no banco de dados. Tente novamente."
+            )
 
-    # Step 2 — configure the webhook + start the connection. Safe to retry: it
-    # reuses the stored token, so a transient failure never leaks a new instance.
+    # ── Step 2 ── configure webhook + start connection. Safe to retry because it
+    # reuses the already-persisted token; a transient failure here never leaks a
+    # new instance on UAZAPI.
     try:
         await wi.set_webhook(instance_token, tenant.slug, webhook_secret)
         conn = await wi.connect_instance(instance_token)
@@ -106,9 +155,27 @@ async def connect_whatsapp(
             "A UAZAPI não respondeu a tempo. Tente gerar o QR novamente em alguns segundos."
         )
     except httpx.HTTPStatusError as exc:
+        body = exc.response.text[:300]
+        logger.error(
+            "uazapi_connect_http_error",
+            extra={"status": exc.response.status_code, "body": body},
+        )
+        if exc.response.status_code == 404:
+            # Instance was deleted on the UAZAPI server — clear token so next click
+            # creates a fresh one.
+            wa_settings = {**wa_settings, "token": None, "instance": None, "status": "disconnected"}
+            _persist_wa_settings(tenant, wa_settings)
+            await db.commit()
+            raise UnprocessableEntityError(
+                "Instância WhatsApp não encontrada no servidor. "
+                "Clique em Conectar novamente para criar uma nova."
+            )
         raise UnprocessableEntityError(
             f"UAZAPI retornou erro {exc.response.status_code} ao gerar o QR. Tente novamente."
         )
+    except Exception as exc:
+        logger.error("uazapi_connect_unexpected_error", extra={"error": str(exc)})
+        raise UnprocessableEntityError(f"Erro inesperado ao conectar: {exc}")
 
     inst = conn.get("instance") or {}
     if not instance_id:
@@ -117,16 +184,14 @@ async def connect_whatsapp(
     pair_code = inst.get("paircode") or ""
     status = "connected" if (conn.get("connected") or conn.get("loggedIn")) else "connecting"
 
-    tenant.settings = {
-        **(tenant.settings or {}),
-        "whatsapp": {
-            **wa_settings,
-            "instance": instance_id,
-            "token": instance_token,
-            "status": status,
-            "webhook_secret": webhook_secret,
-        },
+    wa_settings = {
+        **wa_settings,
+        "instance": instance_id,
+        "token": instance_token,
+        "status": status,
+        "webhook_secret": webhook_secret,
     }
+    _persist_wa_settings(tenant, wa_settings)
     await db.commit()
 
     return {
@@ -168,10 +233,7 @@ async def whatsapp_status(
         status = "disconnected"
 
     if wa_settings.get("status") != status:
-        tenant.settings = {
-            **(tenant.settings or {}),
-            "whatsapp": {**wa_settings, "status": status},
-        }
+        _persist_wa_settings(tenant, {**wa_settings, "status": status})
         await db.commit()
 
     return {"status": status, "instance": instance_id}
@@ -202,8 +264,5 @@ async def disconnect_whatsapp(
             # UAZAPI unreachable or errored — still clear local state
             pass
 
-    tenant.settings = {
-        **(tenant.settings or {}),
-        "whatsapp": {"instance": None, "token": None, "status": "disconnected"},
-    }
+    _persist_wa_settings(tenant, {"instance": None, "token": None, "status": "disconnected"})
     await db.commit()
