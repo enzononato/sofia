@@ -67,11 +67,11 @@ async def create_instance(name: str) -> dict:
         if resp.status_code not in (200, 201):
             logger.error(
                 "uazapi_create_instance_error",
-                extra={"name": name, "status": resp.status_code, "body": resp.text[:500]},
+                extra={"instance_name": name, "status": resp.status_code, "body": resp.text[:500]},
             )
             resp.raise_for_status()
         data = resp.json()
-    logger.info("uazapi_instance_created", extra={"name": name})
+    logger.info("uazapi_instance_created", extra={"instance_name": name})
     return data
 
 
