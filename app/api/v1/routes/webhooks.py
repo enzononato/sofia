@@ -61,12 +61,36 @@ async def whatsapp_webhook(
     rid = getattr(request.state, "request_id", None)
     body = await request.json()
     provided_secret = request.query_params.get("token")
-    event = (body.get("event") or "").lower()
-    data = body.get("data") or {}
 
-    logger.debug(
+    # uazapiGO sends the event type in `EventType` (not `event`) and nests the
+    # payload under a per-event key (`message`, `chat`, `instance`, ...) rather
+    # than a generic `data`. Resolve both defensively across field-name variants.
+    event = (
+        body.get("EventType")
+        or body.get("event")
+        or body.get("type")
+        or body.get("eventType")
+        or ""
+    ).lower()
+    data = (
+        body.get("data")
+        or body.get("message")
+        or body.get("chat")
+        or body.get("presence")
+        or body.get("instance")
+        or {}
+    )
+    if not isinstance(data, dict):
+        data = {}
+
+    logger.info(
         "webhook_received",
-        extra={"request_id": rid, "event": event, "tenant_slug": tenant_slug},
+        extra={
+            "request_id": rid,
+            "event": event or "(empty)",
+            "tenant_slug": tenant_slug,
+            "body_keys": list(body.keys()),
+        },
     )
 
     async with AsyncSessionLocal() as db:
@@ -95,10 +119,11 @@ async def whatsapp_webhook(
         return {"received": True}
 
     # ── Inbound messages ─────────────────────────────────────────────────────
-    if event != "messages":
+    if event not in ("messages", "message"):
         logger.info(
             "webhook_event_ignored",
-            extra={"request_id": rid, "event": event, "tenant_slug": tenant_slug},
+            extra={"request_id": rid, "event": event or "(empty)", "tenant_slug": tenant_slug,
+                   "body_keys": list(body.keys())},
         )
         return {"received": True}
 

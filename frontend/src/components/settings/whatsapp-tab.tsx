@@ -231,8 +231,10 @@ export function WhatsappTab({ tenant }: { tenant: TenantProfile }) {
         </div>
       )}
 
-      {/* QR Code */}
-      {qrCode && status === "connecting" && (
+      {/* QR Code — shown until fully connected. We deliberately keep it visible
+          on a transient "disconnected" poll (the instance is still waiting for
+          the scan) so it doesn't flash away on the first status refresh. */}
+      {qrCode && status !== "connected" && (
         <div className="flex flex-col items-center gap-4 rounded-xl border border-border/50 bg-card/50 p-6">
           <div className="flex items-center gap-2 text-amber-500">
             <QrCode className="h-5 w-5" />

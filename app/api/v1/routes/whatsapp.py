@@ -227,8 +227,22 @@ async def whatsapp_status(
         return {"status": wa_settings.get("status", "unknown"), "instance": instance_id}
 
     st = payload.get("status") or {}
+    inst = payload.get("instance") or {}
+    # The instance's own status string ("connecting" while waiting for the QR
+    # scan) lets us distinguish "waiting to be scanned" from truly disconnected,
+    # so the frontend keeps showing the QR instead of hiding it on the first poll.
+    raw_state = str(inst.get("status") or st.get("status") or "").lower()
+    logger.info(
+        "uazapi_status_payload",
+        extra={"connected": st.get("connected"), "loggedIn": st.get("loggedIn"),
+               "raw_state": raw_state or "(empty)", "status_keys": list(st.keys()),
+               "instance_keys": list(inst.keys())},
+    )
+
     if st.get("connected") or st.get("loggedIn"):
         status = "connected"
+    elif raw_state == "connecting":
+        status = "connecting"
     else:
         status = "disconnected"
 
