@@ -204,6 +204,26 @@ _TYPING_STATES = {"composing", "recording", "paused"}
 # and must NOT free it early.
 _RELEASE_STATES = {"unavailable"}
 
+# Every WhatsApp presence token we recognise. uazapiGO (whatsmeow under the hood)
+# doesn't document which JSON key carries the state, so instead of guessing the
+# field name we scan the event object's values for one of these tokens.
+_PRESENCE_TOKENS = _TYPING_STATES | _RELEASE_STATES | {"available"}
+
+
+def _scan_presence_state(obj: dict) -> str:
+    """Return the first recognised presence token found among a dict's scalar
+    values (one level deep), or "" if none. Field-name-agnostic on purpose."""
+    if not isinstance(obj, dict):
+        return ""
+    for value in obj.values():
+        if isinstance(value, str) and value.lower() in _PRESENCE_TOKENS:
+            return value.lower()
+        if isinstance(value, dict):
+            nested = _scan_presence_state(value)
+            if nested:
+                return nested
+    return ""
+
 
 async def _handle_connection_update(tenant: Tenant, data: dict, rid: str | None) -> None:
     """Persist the WhatsApp connection status from a UAZAPI 'connection' event."""
@@ -257,13 +277,15 @@ def _handle_presence_update(tenant: Tenant, data: dict, request_id: str | None) 
         or raw.get("chatid") or raw.get("sender") or raw.get("id") or raw.get("number")
         or ""
     )
+    # First try the known keys; if they only yield the event *category*
+    # ("presence") or nothing, scan the event object's values for a real
+    # presence token (composing/available/…) regardless of the key name.
     state = str(
-        ev.get("type") or ev.get("presence") or ev.get("status")
-        or (raw.get("type") if isinstance(raw.get("type"), str) else "")
-        or (raw.get("event") if isinstance(raw.get("event"), str) else "")
-        or raw.get("presence") or raw.get("status") or raw.get("lastKnownPresence")
+        ev.get("state") or ev.get("presence") or ev.get("status")
         or ""
     ).lower()
+    if state not in _PRESENCE_TOKENS:
+        state = _scan_presence_state(ev) or _scan_presence_state(raw) or state
 
     if ident.endswith("@lid"):
         phone = _lid_to_phone.get(ident.split("@", 1)[0])
@@ -305,8 +327,8 @@ def _handle_presence_update(tenant: Tenant, data: dict, request_id: str | None) 
             "state": state or "(empty)",
             "action": action,
             # Dump the full event object so the real presence-state field
-            # (composing/available/…) can be identified and wired up.
-            "event_obj": str(ev)[:300] if action == "ignore" else None,
+            # (composing/available/…) can be verified from a live event.
+            "event_obj": str(ev)[:300],
         },
     )
 
