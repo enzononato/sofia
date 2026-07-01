@@ -72,9 +72,9 @@ class Settings(BaseSettings):
     READ_RECEIPT_ENABLED: bool = True
 
     # Presence-aware waiting: hold Sofia's reply while the contact is actively
-    # "typing" (Evolution PRESENCE_UPDATE = composing/recording), so she answers
-    # the whole burst like a human would. Requires the webhook to subscribe to
-    # PRESENCE_UPDATE; degrades to plain debounce if the provider never sends it.
+    # "typing" (UAZAPI presence = composing/recording), so she answers the whole
+    # burst like a human would. Requires the webhook to subscribe to the `presence`
+    # event; degrades to plain debounce if the provider never sends it.
     PRESENCE_TYPING_ENABLED: bool = True
     TYPING_HOLD_SECONDS: float = 12.0       # a composing/recording/paused event keeps us waiting this long
     TYPING_MAX_HOLD_SECONDS: float = 45.0   # absolute cap so a stuck "typing" never hangs the reply
@@ -131,8 +131,7 @@ class Settings(BaseSettings):
     DEFAULT_PAGE_LIMIT: int = 50
     MAX_PAGE_LIMIT: int = 200
 
-    # extra="ignore": tolerate stray env vars (e.g. leftover EVOLUTION_* during the
-    # UAZAPI migration) instead of crashing on boot.
+    # extra="ignore": tolerate stray/legacy env vars instead of crashing on boot.
     model_config = {
         "env_file": ".env",
         "env_file_encoding": "utf-8",

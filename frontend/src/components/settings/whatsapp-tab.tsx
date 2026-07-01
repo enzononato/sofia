@@ -93,7 +93,7 @@ export function WhatsappTab({ tenant }: { tenant: TenantProfile }) {
       const res = await api.post("/tenants/me/whatsapp/connect");
       const qrData = res.data.qr_code;
 
-      // Evolution API returns base64 QR code
+      // UAZAPI returns the QR as a data URI (or raw base64) in `code`.
       if (qrData?.base64) {
         setQrCode(qrData.base64);
       } else if (qrData?.code) {
@@ -101,13 +101,13 @@ export function WhatsappTab({ tenant }: { tenant: TenantProfile }) {
       }
 
       setInstanceName(res.data.instance);
-      setStatus("connecting");
-      setIsPolling(true);
+      setStatus(res.data.status === "connected" ? "connected" : "connecting");
+      setIsPolling(res.data.status !== "connected");
     } catch (err: any) {
       const message =
         err.response?.data?.error?.message ||
         err.response?.data?.detail ||
-        "Erro ao conectar. Verifique se a Evolution API está acessível.";
+        "Erro ao conectar. Tente novamente em alguns segundos.";
       setError(message);
       setIsConnecting(false);
     }

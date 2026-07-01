@@ -11,7 +11,7 @@ Sofia é um **SaaS Multi-tenant de Gestão de Clínicas** integrado a uma **secr
   - Integração com **Google Gemini** para conversação natural.
   - **Function Calling** nativo para interagir com o sistema (consultar agenda, criar agendamentos, cancelar/remarcar consultas, coletar dados do paciente).
   - Reconhecimento de **Estágios da Conversa** para adaptar o tom e a abordagem (primeiro contato, pós-consulta, reativação, etc.).
-- **Integração WhatsApp:** Conexão direta com a **Evolution API** para envio e recebimento de mensagens, incluindo suporte a mídias multimodais (mensagens de voz, fotos e documentos).
+- **Integração WhatsApp:** Conexão direta com a **UAZAPI** para envio e recebimento de mensagens, incluindo suporte a mídias multimodais (mensagens de voz, fotos e documentos).
 - **Painel de Controle Administrador (Dashboard):**
   - **Inbox (Chat em Tempo Real):** Interface estilo WhatsApp Web com capacidade de intervenção manual (handoff), pausando temporariamente a IA.
   - **Calendário Dinâmico:** Grade de horários com controle de profissionais, status de consultas e atualização visual automática.
@@ -26,7 +26,7 @@ Sofia é um **SaaS Multi-tenant de Gestão de Clínicas** integrado a uma **secr
 - **Banco de Dados:** PostgreSQL 16 com SQLAlchemy 2.0 (Async)
 - **Migrações:** Alembic
 - **Integração de IA:** Google Gemini SDK (`google-genai`)
-- **API do WhatsApp:** Evolution API (Self-hosted)
+- **API do WhatsApp:** UAZAPI
 - **Ambiente Virtual:** Python `venv` + Docker Compose para serviços locais
 
 ### Frontend
@@ -56,7 +56,7 @@ Na raiz do projeto, crie um arquivo `.env` com base no arquivo `.env.example`:
 cp .env.example .env
 ```
 
-Abra o `.env` e preencha as variáveis de ambiente necessárias (como a `GEMINI_API_KEY` e as credenciais da `EVOLUTION_API`).
+Abra o `.env` e preencha as variáveis de ambiente necessárias (como a `GEMINI_API_KEY` e as credenciais da UAZAPI: `UAZAPI_URL` e `UAZAPI_ADMIN_TOKEN`).
 
 ---
 

@@ -6,7 +6,7 @@
 ## 1. Visão do Produto
 
 SaaS Multi-tenant de Gestão de Clínicas com IA. Cada clínica (tenant) recebe:
-- Canal de atendimento via **WhatsApp** (Evolution API)
+- Canal de atendimento via **WhatsApp** (UAZAPI)
 - **Secretária virtual autônoma "Sofia"** (Gemini) que agenda, consulta disponibilidade e responde pacientes sem intervenção humana
 - **Dashboard de gestão** completo: Inbox, Calendário, Configurações
 
@@ -25,7 +25,7 @@ Modelo de negócio: uma base de código única, múltiplas clínicas isoladas po
 | Validação | Pydantic v2, pydantic-settings |
 | Auth | JWT (python-jose), bcrypt 3.2.2 + passlib 1.7.4 |
 | IA | Google Gemini (`google-genai 1.10`), Function Calling |
-| WhatsApp | Evolution API (self-hosted, provider-managed) |
+| WhatsApp | UAZAPI (provider-managed) |
 | HTTP client | httpx 0.28 |
 | Infra local | Docker Compose (postgres:16-alpine + pgAdmin) |
 
@@ -200,14 +200,14 @@ O frontend Axios intercepta `401` automaticamente, tenta `POST /auth/refresh` co
 
 > `settings.clinic` é exposto pela tool `get_clinic_info` para que Sofia responda perguntas sobre endereço, telefone, valores e formas de pagamento sem precisar de prompt customizado.
 
-> **IMPORTANTE:** As credenciais da Evolution API (`EVOLUTION_API_URL`, `EVOLUTION_API_KEY`) são variáveis de ambiente do servidor (provider-managed) — **nunca** armazenadas no tenant. O tenant só guarda o `instance` name e o `status` de conexão.
+> **IMPORTANTE:** As credenciais da UAZAPI (`UAZAPI_URL`, `UAZAPI_ADMIN_TOKEN`) são variáveis de ambiente do servidor (provider-managed) — **nunca** armazenadas no tenant. O tenant guarda o `instance` (id), o `token` da instância (credencial, sanitizado) e o `status` de conexão.
 
 ---
 
-## 5. Fluxo de Conexão WhatsApp (Evolution API)
+## 5. Fluxo de Conexão WhatsApp (UAZAPI)
 
 ### Arquitetura
-O **provedor SaaS** hospeda uma instância única da Evolution API. Cada clínica recebe uma instância nomeada `clinic-{tenant_slug}` (determinístico, sem colisões).
+O **provedor SaaS** hospeda um servidor UAZAPI único. Cada clínica recebe sua própria instância, criada via `admintoken`; o `token` retornado autentica os envios daquela clínica. A UAZAPI identifica a instância pelo header `token` (não por nome no path).
 
 ### Fluxo
 ```
@@ -216,17 +216,18 @@ Dono da clínica abre Configurações > WhatsApp
            ▼
 POST /tenants/me/whatsapp/connect  (Frontend)
   ├─ Backend gera webhook_secret (se não existe)
-  ├─ Chama Evolution API: POST /instance/create (idempotente, 409 = já existe)
-  │    └─ Configura webhook apontando para POST /webhooks/whatsapp/{slug}
-  ├─ Chama Evolution API: GET /instance/connect/{instance} → QR Code (base64)
-  ├─ Salva instance + status "connecting" em tenant.settings
-  └─ Retorna { instance, qr_code } para o frontend
+  ├─ Se ainda não há token: POST /instance/create (admintoken) → token da instância
+  │    └─ Persiste o token IMEDIATAMENTE (recliques reusam, sem criar órfãs)
+  ├─ POST /webhook (configura eventos messages/connection/presence; secret no ?token= da URL)
+  ├─ POST /instance/connect → QR Code (data:image/png;base64)
+  ├─ Salva instance + token + status "connecting" em tenant.settings
+  └─ Retorna { instance, status, qr_code } para o frontend
            │
            ▼
 Frontend exibe QR Code → Dono escaneia com WhatsApp Business
            │
            ▼
-Evolution API envia webhook: event="connection.update", state="open"
+UAZAPI envia webhook: event="connection" → connected
   └─ Backend atualiza tenant.settings.whatsapp.status = "connected"
            │
            ▼
@@ -306,7 +307,7 @@ Frontend faz polling em GET /tenants/me/whatsapp/status → detecta "connected" 
 ### Webhooks (público)
 | Método | Rota | Descrição |
 |---|---|---|
-| POST | `/webhooks/whatsapp/{tenant_slug}` | Recebe eventos da Evolution API. Processa `messages.upsert` (mensagens) e `connection.update` (status de conexão) |
+| POST | `/webhooks/whatsapp/{tenant_slug}?token=SECRET` | Recebe eventos da UAZAPI. Processa `messages` (mensagens), `connection` (status) e `presence` (digitando). Secret validado via query param `token` |
 
 ---
 
@@ -388,8 +389,8 @@ system_instruction = BASE (ai_config.system_prompt OR default)
 Quando `tenant.ai_config.multimodal_enabled = true`:
 
 ```
-Webhook → detecta audioMessage/imageMessage/videoMessage/documentMessage
-        → POST /chat/getBase64FromMediaMessage/{instance}  (Evolution API)
+Webhook → detecta messageType de mídia (image/audio/ptt/video/document)
+        → POST /message/download {id: messageid, return_base64: true}  (UAZAPI)
         → salva inbound com media_url=data URI + media_type/mime/size
         → passa bytes para Gemini como Part(inline_data=Blob(...))
         → Sofia interpreta nativamente e responde
@@ -489,9 +490,9 @@ SECRET_KEY=<32+ chars aleatórios>
 DATABASE_URL=postgresql+asyncpg://postgres:postgres@localhost:5432/clinic_saas
 GEMINI_API_KEY=AIza...
 
-# Evolution API (provider-managed, global)
-EVOLUTION_API_URL=https://sua-evolution-api.com
-EVOLUTION_API_KEY=sua-global-api-key
+# UAZAPI (provider-managed, global)
+UAZAPI_URL=https://sua-instancia.uazapi.com
+UAZAPI_ADMIN_TOKEN=seu-admin-token
 APP_BASE_URL=http://localhost:8000  # URL pública do backend (usada para construir webhook URLs)
 
 TENANT_RESOLUTION_STRATEGY=header  # header | subdomain | jwt
@@ -932,4 +933,4 @@ Todas opcionais (defaults já ativam o comportamento humanizado):
 - ✅ `python -c "import app.main"` — boot completo OK
 - ✅ 7 testes inline do humanizer (split por marcador, fallback por tamanho, delay com jitter, batch_window)
 - ✅ 3 testes async do batcher (debounce reseta, flush imediato, disabled → imediato)
-- ⚠️ `send_presence`/`mark_messages_as_read` validados contra a spec da Evolution API v2; não testados contra instância real — best-effort garante que falha não impede a resposta
+- ⚠️ `send_presence`/`mark_messages_as_read` são best-effort — falha nunca impede a resposta. Fluxo de conexão UAZAPI (create→webhook→connect→QR) validado end-to-end contra o servidor real.

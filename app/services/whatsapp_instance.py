@@ -5,10 +5,9 @@ The provider (SaaS owner) hosts a single UAZAPI server on their VPS. Each tenant
 gets its own instance, created once via the admin token; the instance's own
 `token` (returned on create) is then used to authenticate that clinic's calls.
 
-Unlike Evolution (which identified instances by name in the URL path), UAZAPI
-identifies an instance by the `token` header — so callers pass the instance token,
-not a name. The token is a per-clinic credential stored in
-tenant.settings["whatsapp"]["token"] and never exposed to clients.
+UAZAPI identifies an instance by the `token` header (not by a name in the URL
+path) — so callers pass the instance token, not a name. The token is a per-clinic
+credential stored in tenant.settings["whatsapp"]["token"] and never exposed to clients.
 
 Webhook auth: UAZAPI cannot send custom webhook headers, so the per-tenant secret
 is embedded in the webhook URL as a `?token=` query param and validated on receipt.

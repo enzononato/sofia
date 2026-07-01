@@ -56,45 +56,66 @@ async def connect_whatsapp(
 
     tenant = await _get_tenant(db, tenant_id)
 
-    wa_settings = (tenant.settings or {}).get("whatsapp", {})
+    wa_settings = dict((tenant.settings or {}).get("whatsapp", {}))
     webhook_secret = wa_settings.get("webhook_secret") or secrets.token_urlsafe(32)
     instance_token = wa_settings.get("token")
     instance_id = wa_settings.get("instance")
 
-    try:
-        # Create the instance only the first time; reuse the stored token after.
-        if not instance_token:
+    # Step 1 — create the instance ONCE, and persist its token IMMEDIATELY. This is
+    # the only mutating/irreversible step, so we commit before the flakier connect
+    # step: otherwise any later error would drop the token and every retry (or a
+    # double-click) would mint a brand-new orphan instance on UAZAPI.
+    if not instance_token:
+        try:
             created = await wi.create_instance(f"clinic-{tenant.slug}")
-            instance_token = created.get("token") or (created.get("instance") or {}).get("token")
-            instance_id = (created.get("instance") or {}).get("id") or created.get("id")
-            if not instance_token:
-                raise UnprocessableEntityError("UAZAPI não retornou um token de instância.")
+        except RuntimeError:
+            raise UnprocessableEntityError(_NOT_CONFIGURED)
+        except (httpx.ConnectError, httpx.TimeoutException):
+            raise UnprocessableEntityError(
+                "Não foi possível conectar à UAZAPI. Verifique a URL e se o servidor está acessível."
+            )
+        except httpx.HTTPStatusError as exc:
+            raise UnprocessableEntityError(
+                f"UAZAPI retornou erro {exc.response.status_code} ao criar a instância."
+            )
 
+        instance_token = created.get("token") or (created.get("instance") or {}).get("token")
+        instance_id = (created.get("instance") or {}).get("id") or created.get("id")
+        if not instance_token:
+            raise UnprocessableEntityError("UAZAPI não retornou um token de instância.")
+
+        wa_settings = {
+            **wa_settings,
+            "instance": instance_id,
+            "token": instance_token,
+            "status": "connecting",
+            "webhook_secret": webhook_secret,
+        }
+        tenant.settings = {**(tenant.settings or {}), "whatsapp": wa_settings}
+        await db.commit()
+
+    # Step 2 — configure the webhook + start the connection. Safe to retry: it
+    # reuses the stored token, so a transient failure never leaks a new instance.
+    try:
         await wi.set_webhook(instance_token, tenant.slug, webhook_secret)
         conn = await wi.connect_instance(instance_token)
     except RuntimeError:
         raise UnprocessableEntityError(_NOT_CONFIGURED)
-    except httpx.ConnectError:
+    except (httpx.ConnectError, httpx.TimeoutException):
         raise UnprocessableEntityError(
-            "Não foi possível conectar à UAZAPI. Verifique a URL e se o servidor está acessível."
-        )
-    except httpx.TimeoutException:
-        raise UnprocessableEntityError(
-            "A UAZAPI não respondeu a tempo. Tente novamente em alguns segundos."
+            "A UAZAPI não respondeu a tempo. Tente gerar o QR novamente em alguns segundos."
         )
     except httpx.HTTPStatusError as exc:
         raise UnprocessableEntityError(
-            f"UAZAPI retornou erro {exc.response.status_code} ao conectar. Verifique as credenciais."
+            f"UAZAPI retornou erro {exc.response.status_code} ao gerar o QR. Tente novamente."
         )
 
     inst = conn.get("instance") or {}
-    if instance_id is None:
+    if not instance_id:
         instance_id = inst.get("id")
     qr_code = inst.get("qrcode") or ""
     pair_code = inst.get("paircode") or ""
-
-    already_connected = bool(conn.get("connected") or conn.get("loggedIn"))
-    status = "connected" if already_connected else "connecting"
+    status = "connected" if (conn.get("connected") or conn.get("loggedIn")) else "connecting"
 
     tenant.settings = {
         **(tenant.settings or {}),
