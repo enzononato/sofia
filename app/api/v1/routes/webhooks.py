@@ -222,6 +222,34 @@ def _typing_key(tenant_id: uuid.UUID, phone: str) -> str:
     return f"{tenant_id}:{phone}"
 
 
+# Newer WhatsApp delivers PRESENCE_UPDATE keyed by the contact's LID
+# (e.g. "107627602284569@lid") — a privacy identifier unrelated to their phone
+# number — while messages still arrive keyed by the phone. We learn the mapping
+# from inbound message payloads (which carry BOTH identifiers) so presence can be
+# resolved to the right contact. In-process only, consistent with the batcher.
+_lid_to_phone: dict[str, str] = {}
+
+
+def _find_lid(obj, depth: int = 0) -> str | None:
+    """Recursively scan a webhook payload for a WhatsApp LID JID ("…@lid") and
+    return its numeric part, or None. Depth-bounded to stay cheap."""
+    if depth > 5:
+        return None
+    if isinstance(obj, str):
+        return obj.split("@", 1)[0] if obj.endswith("@lid") else None
+    if isinstance(obj, dict):
+        for value in obj.values():
+            found = _find_lid(value, depth + 1)
+            if found:
+                return found
+    elif isinstance(obj, list):
+        for value in obj:
+            found = _find_lid(value, depth + 1)
+            if found:
+                return found
+    return None
+
+
 # Evolution presence states that mean "the contact is still composing a message".
 # 'paused' is included on purpose: WhatsApp emits it when the user stops typing to
 # think — they usually haven't sent yet, so we must keep waiting (treating it as a
@@ -247,8 +275,27 @@ def _handle_presence_update(tenant: Tenant, data: dict, request_id: str | None) 
         entry = next(iter(presences.values()), {})
     state = (entry or {}).get("lastKnownPresence", "")
 
-    phone = jid.replace("@s.whatsapp.net", "").replace("@c.us", "")
+    # Resolve the phone: LID JIDs are mapped from prior inbound messages; plain
+    # phone JIDs are used directly. An unmapped LID means we haven't seen a
+    # message from that contact yet this process — nothing to hold.
+    if jid.endswith("@lid"):
+        phone = _lid_to_phone.get(jid.split("@", 1)[0])
+        resolution = "lid"
+    else:
+        phone = jid.replace("@s.whatsapp.net", "").replace("@c.us", "")
+        resolution = "jid"
+
     if not phone:
+        logger.info(
+            "presence_update",
+            extra={
+                "request_id": request_id,
+                "tenant_id": str(tenant.id),
+                "jid": jid,
+                "state": state or "(empty)",
+                "action": "unmapped",
+            },
+        )
         return
 
     key = _typing_key(tenant.id, phone)
@@ -271,6 +318,7 @@ def _handle_presence_update(tenant: Tenant, data: dict, request_id: str | None) 
             "phone": phone,
             "state": state or "(empty)",
             "action": action,
+            "resolution": resolution,
         },
     )
 
@@ -299,6 +347,16 @@ async def _process_inbound_message(tenant: Tenant, data: dict, request_id: str |
         phone = remote_jid.replace("@s.whatsapp.net", "").replace("@c.us", "")
         push_name: str = data.get("pushName", "")
         whatsapp_msg_id: str = key.get("id", "")
+
+        # Learn this contact's LID→phone mapping so PRESENCE_UPDATE events (which
+        # arrive keyed by LID on newer WhatsApp) can be tied back to the phone.
+        lid = _find_lid(data)
+        if lid and phone and _lid_to_phone.get(lid) != phone:
+            _lid_to_phone[lid] = phone
+            logger.info(
+                "lid_mapped",
+                extra={"request_id": request_id, "tenant_id": str(tenant.id), "lid": lid, "phone": phone},
+            )
 
         msg_timestamp = data.get("messageTimestamp", 0)
         is_historical = msg_timestamp > 0 and (time.time() - msg_timestamp) > 300
