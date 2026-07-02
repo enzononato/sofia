@@ -12,79 +12,54 @@
 
 @layer base {
   .theme {
-    --font-heading: var(--font-sans);
+    --font-heading: var(--font-heading);
     --font-sans: var(--font-sans);
   }
-  :root {
-    --background: oklch(1 0 0);
-    --foreground: oklch(0.145 0 0);
-    --card: oklch(1 0 0);
-    --card-foreground: oklch(0.145 0 0);
-    --popover: oklch(1 0 0);
-    --popover-foreground: oklch(0.145 0 0);
-    --primary: oklch(0.205 0 0);
-    --primary-foreground: oklch(0.985 0 0);
-    --secondary: oklch(0.97 0 0);
-    --secondary-foreground: oklch(0.205 0 0);
-    --muted: oklch(0.97 0 0);
-    --muted-foreground: oklch(0.556 0 0);
-    --accent: oklch(0.97 0 0);
-    --accent-foreground: oklch(0.205 0 0);
-    --destructive: oklch(0.577 0.245 27.325);
-    --border: oklch(0.922 0 0);
-    --input: oklch(0.922 0 0);
-    --ring: oklch(0.708 0 0);
-    --chart-1: oklch(0.87 0 0);
-    --chart-2: oklch(0.556 0 0);
-    --chart-3: oklch(0.439 0 0);
-    --chart-4: oklch(0.371 0 0);
-    --chart-5: oklch(0.269 0 0);
-    --radius: 0.625rem;
-    --sidebar: oklch(0.985 0 0);
-    --sidebar-foreground: oklch(0.145 0 0);
-    --sidebar-primary: oklch(0.205 0 0);
-    --sidebar-primary-foreground: oklch(0.985 0 0);
-    --sidebar-accent: oklch(0.97 0 0);
-    --sidebar-accent-foreground: oklch(0.205 0 0);
-    --sidebar-border: oklch(0.922 0 0);
-    --sidebar-ring: oklch(0.708 0 0);
-  }
+  /* ── Sofia design system (Stitch) ──────────────────────────────────────────
+     Deep-navy surfaces, violet primary, magenta/cyan accents, glassmorphism.
+     The mockups are dark-only, so :root mirrors .dark to keep the look
+     consistent regardless of the resolved theme class. Colors are full CSS
+     values consumed as var(--x); translucency uses color-mix, not the /alpha
+     modifier (which this token setup doesn't support). */
+  :root,
   .dark {
-    --background: oklch(0.145 0 0);
-    --foreground: oklch(0.985 0 0);
-    --card: oklch(0.205 0 0);
-    --card-foreground: oklch(0.985 0 0);
-    --popover: oklch(0.205 0 0);
-    --popover-foreground: oklch(0.985 0 0);
-    --primary: oklch(0.922 0 0);
-    --primary-foreground: oklch(0.205 0 0);
-    --secondary: oklch(0.269 0 0);
-    --secondary-foreground: oklch(0.985 0 0);
-    --muted: oklch(0.269 0 0);
-    --muted-foreground: oklch(0.708 0 0);
-    --accent: oklch(0.269 0 0);
-    --accent-foreground: oklch(0.985 0 0);
-    --destructive: oklch(0.704 0.191 22.216);
-    --border: oklch(1 0 0 / 10%);
-    --input: oklch(1 0 0 / 15%);
-    --ring: oklch(0.556 0 0);
-    --chart-1: oklch(0.87 0 0);
-    --chart-2: oklch(0.556 0 0);
-    --chart-3: oklch(0.439 0 0);
-    --chart-4: oklch(0.371 0 0);
-    --chart-5: oklch(0.269 0 0);
-    --sidebar: oklch(0.205 0 0);
-    --sidebar-foreground: oklch(0.985 0 0);
-    --sidebar-primary: oklch(0.488 0.243 264.376);
-    --sidebar-primary-foreground: oklch(0.985 0 0);
-    --sidebar-accent: oklch(0.269 0 0);
-    --sidebar-accent-foreground: oklch(0.985 0 0);
-    --sidebar-border: oklch(1 0 0 / 10%);
-    --sidebar-ring: oklch(0.556 0 0);
+    --background: #0b1326;
+    --foreground: #dae2fd;
+    --card: #171f33;
+    --card-foreground: #dae2fd;
+    --popover: #171f33;
+    --popover-foreground: #dae2fd;
+    --primary: #d0bcff;
+    --primary-foreground: #34007f;
+    --secondary: #222a3d;
+    --secondary-foreground: #dae2fd;
+    --muted: #222a3d;
+    --muted-foreground: #9aa3bd;
+    --accent: #2d3449;
+    --accent-foreground: #dae2fd;
+    --destructive: #f43f5e;
+    --destructive-foreground: #ffffff;
+    --border: rgba(255, 255, 255, 0.1);
+    --input: rgba(255, 255, 255, 0.14);
+    --ring: #d0bcff;
+    --chart-1: #a078ff;
+    --chart-2: #4cd7f6;
+    --chart-3: #fbabff;
+    --chart-4: #10b981;
+    --chart-5: #f59e0b;
+    --radius: 0.75rem;
+    --sidebar: #0f1728;
+    --sidebar-foreground: #dae2fd;
+    --sidebar-primary: #d0bcff;
+    --sidebar-primary-foreground: #34007f;
+    --sidebar-accent: #1b2338;
+    --sidebar-accent-foreground: #dae2fd;
+    --sidebar-border: rgba(255, 255, 255, 0.08);
+    --sidebar-ring: #d0bcff;
   }
   * {
     @apply border-border;
-    outline-color: oklch(var(--ring) / 0.5);
+    outline-color: color-mix(in srgb, var(--ring) 50%, transparent);
   }
   body {
     @apply bg-background text-foreground;
@@ -92,17 +67,89 @@
   html {
     @apply font-sans;
   }
+  h1, h2, h3, h4, h5 {
+    font-family: var(--font-heading), var(--font-sans), sans-serif;
+  }
 }
 
 @layer utilities {
+  /* Frosted-glass panel used across cards and auth screens. */
   .glass {
     @apply backdrop-blur-xl border border-white/10 shadow-2xl;
-    background-color: color-mix(in oklch, var(--background) 60%, transparent);
+    background-color: rgba(30, 41, 59, 0.55);
+  }
+  .glass-card {
+    background: rgba(30, 41, 59, 0.5);
+    backdrop-filter: blur(16px);
+    -webkit-backdrop-filter: blur(16px);
+    border: 1px solid rgba(255, 255, 255, 0.12);
+    box-shadow: 0 25px 50px -12px rgba(0, 0, 0, 0.5);
   }
   .bg-gradient-premium {
     @apply bg-[radial-gradient(ellipse_at_top,_var(--tw-gradient-stops))] via-background to-background;
-    --tw-gradient-from: color-mix(in srgb, #1e3a8a 20%, transparent);
-    --tw-gradient-to: color-mix(in srgb, #1e3a8a 0%, transparent);
+    --tw-gradient-from: color-mix(in srgb, #8b5cf6 18%, transparent);
+    --tw-gradient-to: color-mix(in srgb, #8b5cf6 0%, transparent);
     --tw-gradient-stops: var(--tw-gradient-from), var(--tw-gradient-to);
+  }
+
+  /* Violet→magenta gradient CTA (Sofia primary action). */
+  .sofia-btn-gradient {
+    background-image: linear-gradient(135deg, #a078ff 0%, #ae05c6 100%);
+    transition: box-shadow 0.3s ease, transform 0.3s ease;
+  }
+  .sofia-btn-gradient:hover {
+    box-shadow: 0 0 20px rgba(167, 139, 250, 0.5);
+    transform: translateY(-2px);
+  }
+  .sofia-btn-gradient:active {
+    transform: scale(0.98);
+  }
+}
+
+/* Ambient aurora backdrop: two slow-drifting blurred orbs behind content.
+   No overflow:hidden here (matches the Stitch mockup) — clipping the blobs'
+   box edges before the blur filter softens them would give the glow a
+   harder, more visible edge than the reference design. */
+.aurora-bg {
+  position: absolute;
+  inset: 0;
+  z-index: 0;
+  filter: blur(100px);
+  opacity: 0.6;
+  pointer-events: none;
+  overflow: hidden;
+}
+.aurora-blob {
+  position: absolute;
+  border-radius: 9999px;
+}
+.aurora-violet {
+  top: -10%;
+  left: -10%;
+  width: 50%;
+  height: 50%;
+  background: radial-gradient(circle, #8b5cf6 0%, transparent 70%);
+  animation: aurora-drift 20s infinite alternate;
+}
+.aurora-cyan {
+  bottom: -10%;
+  right: -10%;
+  width: 60%;
+  height: 60%;
+  background: radial-gradient(circle, #06b6d4 0%, transparent 70%);
+  animation: aurora-drift 25s infinite alternate-reverse;
+}
+@keyframes aurora-drift {
+  from {
+    transform: translate(0, 0) scale(1);
+  }
+  to {
+    transform: translate(10%, 10%) scale(1.1);
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .aurora-violet,
+  .aurora-cyan {
+    animation: none;
   }
 }

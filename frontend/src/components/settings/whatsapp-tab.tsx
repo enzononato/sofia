@@ -179,10 +179,10 @@ export function WhatsappTab({ tenant }: { tenant: TenantProfile }) {
   const current = statusConfig[status];
 
   return (
-    <div className="space-y-8 max-w-2xl">
+    <div className="space-y-8 max-w-2xl bg-background/5">
       <div>
-        <h3 className="text-lg font-medium">Conexão WhatsApp</h3>
-        <p className="text-sm text-muted-foreground mt-1">
+        <h3 className="font-heading text-lg font-bold text-foreground">Conexão WhatsApp</h3>
+        <p className="text-xs text-muted-foreground/80 font-sans mt-0.5">
           Conecte o WhatsApp da sua clínica para que a Sofia possa atender seus pacientes automaticamente.
         </p>
       </div>
@@ -190,79 +190,77 @@ export function WhatsappTab({ tenant }: { tenant: TenantProfile }) {
       {/* Status Card */}
       <div
         className={cn(
-          "rounded-xl border p-5 flex items-center gap-4 transition-colors",
-          current.bg,
+          "rounded-2xl border p-4.5 flex items-center gap-4 transition-all shadow-md bg-white/5",
           status === "connected"
-            ? "border-emerald-500/30"
+            ? "border-emerald-500/20"
             : status === "connecting"
-            ? "border-amber-500/30"
-            : "border-border/50"
+            ? "border-amber-500/20"
+            : "border-white/10"
         )}
       >
         <div className={cn("shrink-0", current.color)}>{current.icon}</div>
         <div className="flex-1 min-w-0">
-          <p className={cn("text-sm font-semibold", current.color)}>
+          <p className={cn("font-heading text-sm font-bold", current.color)}>
             {current.label}
           </p>
           {instanceName && (
-            <p className="text-xs text-muted-foreground mt-0.5 truncate">
-              Instância: <code className="font-mono">{instanceName}</code>
+            <p className="text-xs text-muted-foreground/80 mt-0.5 truncate font-sans">
+              Instância: <code className="font-mono bg-white/5 border border-white/5 rounded-md px-1.5 py-0.5 text-[11px] text-foreground">{instanceName}</code>
             </p>
           )}
         </div>
         <div className="shrink-0 flex gap-2">
           {status !== "loading" && (
-            <Button
-              variant="ghost"
-              size="sm"
+            <button
               onClick={fetchStatus}
-              className="text-muted-foreground"
+              className="text-muted-foreground hover:text-foreground cursor-pointer rounded-lg hover:bg-white/5 p-1.5 transition-colors"
             >
               <RefreshCw className="h-4 w-4" />
-            </Button>
+            </button>
           )}
         </div>
       </div>
 
       {/* Error */}
       {error && (
-        <div className="rounded-xl border border-red-500/30 bg-red-500/10 p-4">
-          <p className="text-sm text-red-400">{error}</p>
+        <div className="rounded-2xl border border-red-500/20 bg-red-500/5 p-4 shadow-md">
+          <p className="text-xs font-sans font-semibold text-red-400 flex items-center gap-1.5">
+            <AlertCircle className="h-4 w-4 shrink-0" />
+            {error}
+          </p>
         </div>
       )}
 
-      {/* QR Code — shown until fully connected. We deliberately keep it visible
-          on a transient "disconnected" poll (the instance is still waiting for
-          the scan) so it doesn't flash away on the first status refresh. */}
+      {/* QR Code */}
       {qrCode && status !== "connected" && (
-        <div className="flex flex-col items-center gap-4 rounded-xl border border-border/50 bg-card/50 p-6">
-          <div className="flex items-center gap-2 text-amber-500">
-            <QrCode className="h-5 w-5" />
-            <p className="text-sm font-medium">Escaneie o QR Code com seu WhatsApp</p>
+        <div className="flex flex-col items-center gap-4 rounded-2xl border border-white/10 bg-white/5 p-6 shadow-xl">
+          <div className="flex items-center gap-2 text-amber-400">
+            <QrCode className="h-5 w-5 animate-pulse" />
+            <p className="font-heading text-sm font-semibold">Escaneie o QR Code com seu WhatsApp</p>
           </div>
-          <div className="bg-white rounded-xl p-4 shadow-md">
+          <div className="bg-white rounded-2xl p-4.5 shadow-2xl">
             <img
               src={qrCode.startsWith("data:") ? qrCode : `data:image/png;base64,${qrCode}`}
               alt="QR Code WhatsApp"
               className="w-64 h-64 object-contain"
             />
           </div>
-          <p className="text-xs text-muted-foreground text-center max-w-sm">
-            Abra o WhatsApp no celular → Menu (⋮) → Dispositivos Conectados → Conectar Dispositivo → Escaneie o código acima.
+          <p className="text-xs text-muted-foreground/80 text-center max-w-sm font-sans leading-relaxed">
+            Abra o WhatsApp no celular → Menu (⋮) → Aparelhos conectados → Conectar um aparelho → Escaneie o código acima.
           </p>
         </div>
       )}
 
-      {/* Connected state */}
+      {/* Connected state info banner */}
       {status === "connected" && (
-        <div className="rounded-xl border border-emerald-500/20 bg-emerald-500/5 p-5">
+        <div className="rounded-2xl border border-emerald-500/20 bg-emerald-500/5 p-5 shadow-md">
           <div className="flex items-start gap-3">
-            <Wifi className="h-5 w-5 text-emerald-500 shrink-0 mt-0.5" />
+            <Wifi className="h-5 w-5 text-emerald-400 shrink-0 mt-0.5" />
             <div>
-              <p className="text-sm font-medium text-emerald-500">
+              <p className="font-heading text-sm font-bold text-emerald-400">
                 WhatsApp conectado com sucesso!
               </p>
-              <p className="text-xs text-muted-foreground mt-1 leading-relaxed">
+              <p className="text-xs text-muted-foreground/80 mt-1 leading-relaxed font-sans">
                 A Sofia está pronta para atender seus pacientes. As mensagens recebidas
                 aparecerão automaticamente no <strong>Inbox</strong> e serão respondidas pela IA.
               </p>
@@ -276,81 +274,80 @@ export function WhatsappTab({ tenant }: { tenant: TenantProfile }) {
         {(status === "not_configured" ||
           status === "disconnected" ||
           status === "unknown") && (
-          <Button onClick={handleConnect} disabled={isConnecting}>
+          <button onClick={handleConnect} disabled={isConnecting} className="sofia-btn-gradient px-5 py-2.5 rounded-xl text-white font-bold text-xs shadow-md shadow-primary/20 hover:brightness-110 active:scale-95 flex items-center justify-center gap-1.5 cursor-pointer text-center">
             {isConnecting ? (
-              <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+              <Loader2 className="mr-1.5 h-3.5 w-3.5 animate-spin" />
             ) : (
-              <QrCode className="mr-2 h-4 w-4" />
+              <QrCode className="mr-1.5 h-3.5 w-3.5" />
             )}
             Conectar WhatsApp
-          </Button>
+          </button>
         )}
 
         {status === "connecting" && !qrCode && (
-          <Button onClick={handleConnect} disabled={isConnecting}>
+          <button onClick={handleConnect} disabled={isConnecting} className="sofia-btn-gradient px-5 py-2.5 rounded-xl text-white font-bold text-xs shadow-md shadow-primary/20 hover:brightness-110 active:scale-95 flex items-center justify-center gap-1.5 cursor-pointer text-center">
             {isConnecting ? (
-              <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+              <Loader2 className="mr-1.5 h-3.5 w-3.5 animate-spin" />
             ) : (
-              <RefreshCw className="mr-2 h-4 w-4" />
+              <RefreshCw className="mr-1.5 h-3.5 w-3.5" />
             )}
             Gerar Novo QR Code
-          </Button>
+          </button>
         )}
 
         {(status === "connected" || status === "connecting") && (
-          <Button
-            variant="outline"
+          <button
             onClick={() => setShowDisconnectDialog(true)}
             disabled={isDisconnecting}
-            className="text-destructive border-destructive/30 hover:bg-destructive/10"
+            className="h-10 text-xs rounded-xl px-4 text-destructive border border-destructive/20 bg-destructive/5 hover:bg-destructive/10 transition-all cursor-pointer font-semibold flex items-center gap-1.5"
           >
             {isDisconnecting ? (
-              <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+              <Loader2 className="mr-1.5 h-3.5 w-3.5 animate-spin" />
             ) : (
-              <Unplug className="mr-2 h-4 w-4" />
+              <Unplug className="mr-1.5 h-3.5 w-3.5" />
             )}
             Desconectar
-          </Button>
+          </button>
         )}
       </div>
 
       {/* Disconnect confirmation dialog */}
       <Dialog open={showDisconnectDialog} onOpenChange={setShowDisconnectDialog}>
-        <DialogContent>
-          <DialogHeader>
-            <DialogTitle>Desconectar WhatsApp?</DialogTitle>
-            <DialogDescription>
+        <DialogContent className="sm:max-w-[440px] bg-background/95 border-white/10 backdrop-blur-md rounded-[28px] p-6 shadow-2xl overflow-hidden animate-in fade-in duration-200">
+          <DialogHeader className="space-y-1">
+            <DialogTitle className="font-heading text-lg font-bold text-foreground">Desconectar WhatsApp?</DialogTitle>
+            <DialogDescription className="text-xs text-muted-foreground/80 font-sans mt-0.5">
               A Sofia não poderá mais responder mensagens no WhatsApp enquanto estiver desconectado.
               Você poderá reconectar a qualquer momento.
             </DialogDescription>
           </DialogHeader>
-          <DialogFooter>
-            <Button variant="outline" onClick={() => setShowDisconnectDialog(false)}>
+          <DialogFooter className="pt-4 border-t border-white/10 flex flex-col-reverse sm:flex-row justify-end gap-3 mt-4">
+            <button onClick={() => setShowDisconnectDialog(false)} className="px-5 py-2.5 rounded-xl font-semibold text-muted-foreground hover:bg-white/5 hover:text-foreground text-xs transition-all cursor-pointer text-center">
               Cancelar
-            </Button>
-            <Button variant="destructive" onClick={handleDisconnect} disabled={isDisconnecting}>
-              {isDisconnecting ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : null}
+            </button>
+            <button onClick={handleDisconnect} disabled={isDisconnecting} className="h-10 text-xs rounded-xl px-4 bg-destructive text-white hover:brightness-110 shadow-md shadow-destructive/20 transition-all cursor-pointer font-semibold flex items-center justify-center">
+              {isDisconnecting && <Loader2 className="mr-1.5 h-3.5 w-3.5 animate-spin" />}
               Sim, desconectar
-            </Button>
+            </button>
           </DialogFooter>
         </DialogContent>
       </Dialog>
 
       {/* Behaviour settings */}
       <div className="space-y-3">
-        <h4 className="text-sm font-semibold">Comportamento</h4>
-        <div className="flex flex-row items-center justify-between rounded-lg border border-border/50 p-4 bg-muted/20">
+        <h4 className="font-heading text-sm font-semibold text-foreground">Comportamento</h4>
+        <div className="flex flex-row items-center justify-between rounded-2xl border border-white/10 p-4 bg-white/5 shadow-md">
           <div className="space-y-0.5">
-            <Label className="text-base flex items-center gap-2">
-              <Users className="h-4 w-4 text-muted-foreground" />
+            <Label className="font-heading text-sm font-semibold text-foreground flex items-center gap-2">
+              <Users className="h-4 w-4 text-muted-foreground/60" />
               Ignorar mensagens de grupos
             </Label>
-            <p className="text-sm text-muted-foreground">
+            <p className="text-xs text-muted-foreground/80 font-sans mt-0.5 leading-relaxed">
               A Sofia não responde mensagens enviadas em grupos do WhatsApp, apenas conversas individuais.
             </p>
           </div>
           <div className="flex items-center gap-3">
-            {isSavingBehaviour && <Loader2 className="h-4 w-4 animate-spin text-muted-foreground" />}
+            {isSavingBehaviour && <Loader2 className="h-4 w-4 animate-spin text-primary" />}
             <Switch
               checked={ignoreGroups}
               onCheckedChange={async (checked) => {
@@ -358,20 +355,21 @@ export function WhatsappTab({ tenant }: { tenant: TenantProfile }) {
                 await updateTenant({ settings: { ignore_groups: checked } });
               }}
               disabled={isSavingBehaviour}
+              className="cursor-pointer"
             />
           </div>
         </div>
       </div>
 
       {/* Info box */}
-      <div className="rounded-xl border border-blue-500/20 bg-blue-500/5 p-4 mt-4">
-        <h4 className="text-sm font-semibold text-blue-400 mb-1.5">
+      <div className="rounded-2xl border border-blue-500/20 bg-blue-500/5 p-5 mt-4 shadow-md">
+        <h4 className="font-heading text-sm font-semibold text-blue-400 mb-2">
           Como funciona?
         </h4>
-        <ol className="text-xs text-muted-foreground space-y-1.5 list-decimal list-inside leading-relaxed">
+        <ol className="text-xs text-muted-foreground/80 space-y-1.5 list-decimal list-inside leading-relaxed font-sans">
           <li>Clique em <strong>"Conectar WhatsApp"</strong> para gerar um QR Code.</li>
           <li>Escaneie o código com o app WhatsApp Business do celular da clínica.</li>
-          <li>Quando aparecer <span className="text-emerald-500 font-medium">●&nbsp;Conectado</span>, a Sofia começa a atender automaticamente.</li>
+          <li>Quando aparecer <span className="text-emerald-400 font-semibold">●&nbsp;Conectado</span>, a Sofia começa a atender automaticamente.</li>
           <li>As conversas aparecerão no <strong>Inbox</strong> do painel em tempo real.</li>
         </ol>
       </div>

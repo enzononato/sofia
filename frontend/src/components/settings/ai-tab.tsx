@@ -86,65 +86,65 @@ export function AiTab({ tenant }: { tenant: TenantProfile }) {
   };
 
   return (
-    <form onSubmit={handleSubmit(onSubmit)} className="space-y-6 max-w-3xl">
+    <form onSubmit={handleSubmit(onSubmit)} className="space-y-6 max-w-3xl bg-background/5">
       <div>
-        <h3 className="text-lg font-medium">Inteligência Artificial (Sofia)</h3>
-        <p className="text-sm text-muted-foreground mt-1">
+        <h3 className="font-heading text-lg font-bold text-foreground">Inteligência Artificial (Sofia)</h3>
+        <p className="text-xs text-muted-foreground/80 font-sans mt-0.5">
           Configure a personalidade, o tom de voz e as regras de negócio da sua secretária virtual.
         </p>
       </div>
 
       <div className="grid gap-6">
         <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
-          <div className="grid gap-3">
-            <Label htmlFor="model">Modelo de IA</Label>
+          <div className="grid gap-1.5">
+            <Label htmlFor="model" className="font-mono text-[10px] uppercase tracking-wider text-muted-foreground/80 block">Modelo de IA</Label>
             <div className="relative">
-              <Bot className="absolute left-3 top-3 h-4 w-4 text-muted-foreground" />
-              <Input id="model" {...register("model")} className="pl-9" />
+              <Bot className="absolute left-3.5 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground/60" />
+              <Input id="model" {...register("model")} className="h-11 pl-10 rounded-xl border-white/10 bg-background/55 text-foreground text-sm focus-visible:ring-1 focus-visible:ring-primary/50 focus:border-primary/50 transition-all w-full" />
             </div>
-            {errors.model && <p className="text-sm text-destructive">{errors.model.message}</p>}
+            {errors.model && <p className="text-xs text-destructive font-sans font-medium">{errors.model.message as string}</p>}
           </div>
 
-          <div className="grid gap-3">
-            <Label htmlFor="temperature">Temperatura (0 a 2)</Label>
+          <div className="grid gap-1.5">
+            <Label htmlFor="temperature" className="font-mono text-[10px] uppercase tracking-wider text-muted-foreground/80 block">Temperatura (0 a 2)</Label>
             <div className="relative">
-              <SlidersHorizontal className="absolute left-3 top-3 h-4 w-4 text-muted-foreground" />
-              <Input id="temperature" type="number" step="0.1" {...register("temperature")} className="pl-9" />
+              <SlidersHorizontal className="absolute left-3.5 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground/60" />
+              <Input id="temperature" type="number" step="0.1" {...register("temperature")} className="h-11 pl-10 rounded-xl border-white/10 bg-background/55 text-foreground text-sm focus-visible:ring-1 focus-visible:ring-primary/50 focus:border-primary/50 transition-all w-full" />
             </div>
-            {errors.temperature && <p className="text-sm text-destructive">{errors.temperature.message}</p>}
+            {errors.temperature && <p className="text-xs text-destructive font-sans font-medium">{errors.temperature.message as string}</p>}
           </div>
 
-          <div className="grid gap-3">
-            <Label htmlFor="max_output_tokens">Max Tokens</Label>
+          <div className="grid gap-1.5">
+            <Label htmlFor="max_output_tokens" className="font-mono text-[10px] uppercase tracking-wider text-muted-foreground/80 block">Max Tokens</Label>
             <div className="relative">
-              <MessageSquare className="absolute left-3 top-3 h-4 w-4 text-muted-foreground" />
-              <Input id="max_output_tokens" type="number" {...register("max_output_tokens")} className="pl-9" />
+              <MessageSquare className="absolute left-3.5 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground/60" />
+              <Input id="max_output_tokens" type="number" {...register("max_output_tokens")} className="h-11 pl-10 rounded-xl border-white/10 bg-background/55 text-foreground text-sm focus-visible:ring-1 focus-visible:ring-primary/50 focus:border-primary/50 transition-all w-full" />
             </div>
-            {errors.max_output_tokens && <p className="text-sm text-destructive">{errors.max_output_tokens.message}</p>}
+            {errors.max_output_tokens && <p className="text-xs text-destructive font-sans font-medium">{errors.max_output_tokens.message as string}</p>}
           </div>
         </div>
 
-        <div className="grid gap-3">
-          <Label htmlFor="system_prompt">Prompt base — identidade da Sofia</Label>
+        <div className="grid gap-1.5">
+          <Label htmlFor="system_prompt" className="font-mono text-[10px] uppercase tracking-wider text-muted-foreground/80 block">Prompt base — identidade da Sofia</Label>
           <Textarea 
             id="system_prompt" 
             {...register("system_prompt")} 
-            className="min-h-[250px] font-mono text-sm leading-relaxed p-4" 
+            className="min-h-[200px] font-mono text-sm leading-relaxed p-4 rounded-xl border border-white/10 bg-background/55 text-foreground focus:outline-none focus:ring-1 focus:ring-primary/50 w-full" 
             placeholder="Você é a Sofia, secretária da clínica..."
           />
-          <p className="text-xs text-muted-foreground">
+          <p className="text-[11px] text-muted-foreground/80 font-sans leading-relaxed">
             Descreva como a IA deve se comportar, qual o tom de voz e restrições importantes. Ela já sabe as ferramentas de agendamento por padrão.
           </p>
-          {errors.system_prompt && <p className="text-sm text-destructive">{errors.system_prompt.message}</p>}
+          {errors.system_prompt && <p className="text-xs text-destructive font-sans font-medium">{errors.system_prompt.message as string}</p>}
         </div>
 
-        <div className="flex flex-row items-center justify-between rounded-lg border border-border/50 p-4 bg-muted/20">
+        <div className="flex flex-row items-center justify-between rounded-2xl border border-white/10 p-4 bg-white/5 shadow-md">
           <div className="space-y-0.5">
-            <Label className="text-base flex items-center gap-2">
-              <Sparkles className="h-4 w-4 text-amber-500" />
+            <Label className="font-heading text-sm font-semibold text-foreground flex items-center gap-2">
+              <Sparkles className="h-4 w-4 text-primary animate-pulse" />
               IA Multimodal (Áudio, Imagem e Documentos)
             </Label>
-            <p className="text-sm text-muted-foreground">
+            <p className="text-xs text-muted-foreground/80 font-sans mt-0.5 leading-relaxed">
               Permite que a Sofia interprete áudios (até 1m30s), imagens, vídeos e documentos enviados pelos pacientes. Aumenta o custo por mensagem.
             </p>
           </div>
@@ -152,111 +152,111 @@ export function AiTab({ tenant }: { tenant: TenantProfile }) {
             name="multimodal_enabled"
             control={control}
             render={({ field }) => (
-              <Switch checked={field.value} onCheckedChange={field.onChange} />
+              <Switch checked={field.value} onCheckedChange={field.onChange} className="cursor-pointer" />
             )}
           />
         </div>
 
         <div className="grid gap-3 pt-2">
           <div className="flex flex-col gap-1">
-            <Label className="text-base font-semibold">Prompts por estágio da conversa</Label>
-            <p className="text-sm text-muted-foreground">
+            <Label className="font-heading text-base font-semibold text-foreground">Prompts por estágio da conversa</Label>
+            <p className="text-xs text-muted-foreground/80 font-sans leading-relaxed">
               A Sofia detecta o contexto do paciente e injeta essas instruções adicionais no prompt base. Se deixar vazio, ela usará o texto padrão.
             </p>
           </div>
 
-          <Accordion className="w-full border border-border/50 rounded-lg bg-card">
-            <AccordionItem value="first_contact">
-              <AccordionTrigger className="px-4 hover:bg-muted/50 rounded-t-lg">
-                <div className="flex flex-col items-start gap-1">
-                  <span>Primeiro contato</span>
-                  <span className="text-xs text-muted-foreground font-normal">quando o paciente nunca mandou mensagem antes</span>
+          <Accordion className="w-full border border-white/10 rounded-2xl bg-white/5 overflow-hidden shadow-md">
+            <AccordionItem value="first_contact" className="border-b border-white/10">
+              <AccordionTrigger className="px-4 hover:bg-white/5 transition-colors">
+                <div className="flex flex-col items-start gap-0.5 text-left">
+                  <span className="font-heading text-sm font-semibold text-foreground">Primeiro contato</span>
+                  <span className="text-xs text-muted-foreground/70 font-sans font-normal">quando o paciente nunca mandou mensagem antes</span>
                 </div>
               </AccordionTrigger>
               <AccordionContent className="px-4 pb-4 pt-2">
                 <Textarea 
                   {...register("prompt_first_contact")} 
-                  className="min-h-[120px] text-sm" 
+                  className="min-h-[120px] rounded-xl border border-white/10 bg-background/55 text-foreground p-3 text-sm focus:outline-none focus:ring-1 focus:ring-primary/50 w-full font-sans leading-relaxed" 
                   placeholder={"Esta é a PRIMEIRA conversa deste paciente com a clínica.\n- Apresente-se brevemente como Sofia, a secretária virtual.\n- Pergunte como pode ajudar de forma acolhedora.\n- Se o paciente já mandou uma dúvida concreta, vá direto resolvendo — não obrigue a passar por uma apresentação se ele já está pedindo algo."}
                 />
               </AccordionContent>
             </AccordionItem>
 
-            <AccordionItem value="imminent_appointment">
-              <AccordionTrigger className="px-4 hover:bg-muted/50">
-                <div className="flex flex-col items-start gap-1">
-                  <span>Agendamento próximo</span>
-                  <span className="text-xs text-muted-foreground font-normal">quando o paciente tem consulta nas próximas 48h</span>
+            <AccordionItem value="imminent_appointment" className="border-b border-white/10">
+              <AccordionTrigger className="px-4 hover:bg-white/5 transition-colors">
+                <div className="flex flex-col items-start gap-0.5 text-left">
+                  <span className="font-heading text-sm font-semibold text-foreground">Agendamento próximo</span>
+                  <span className="text-xs text-muted-foreground/70 font-sans font-normal">quando o paciente tem consulta nas próximas 48h</span>
                 </div>
               </AccordionTrigger>
               <AccordionContent className="px-4 pb-4 pt-2">
                 <Textarea 
                   {...register("prompt_imminent_appointment")} 
-                  className="min-h-[120px] text-sm" 
+                  className="min-h-[120px] rounded-xl border border-white/10 bg-background/55 text-foreground p-3 text-sm focus:outline-none focus:ring-1 focus:ring-primary/50 w-full font-sans leading-relaxed" 
                   placeholder={"O paciente TEM um agendamento confirmado nas próximas 48 horas.\n- É provável que esteja entrando em contato sobre isso (confirmar, remarcar ou cancelar).\n- Use get_upcoming_appointments para ver os detalhes antes de responder.\n- Se ele quiser remarcar, use reschedule_appointment (não cancela e cria de novo)."}
                 />
               </AccordionContent>
             </AccordionItem>
 
-            <AccordionItem value="post_appointment">
-              <AccordionTrigger className="px-4 hover:bg-muted/50">
-                <div className="flex flex-col items-start gap-1">
-                  <span>Pós-atendimento</span>
-                  <span className="text-xs text-muted-foreground font-normal">quando o paciente teve consulta nas últimas 48h</span>
+            <AccordionItem value="post_appointment" className="border-b border-white/10">
+              <AccordionTrigger className="px-4 hover:bg-white/5 transition-colors">
+                <div className="flex flex-col items-start gap-0.5 text-left">
+                  <span className="font-heading text-sm font-semibold text-foreground">Pós-atendimento</span>
+                  <span className="text-xs text-muted-foreground/70 font-sans font-normal">quando o paciente teve consulta nas últimas 48h</span>
                 </div>
               </AccordionTrigger>
               <AccordionContent className="px-4 pb-4 pt-2">
                 <Textarea 
                   {...register("prompt_post_appointment")} 
-                  className="min-h-[120px] text-sm" 
+                  className="min-h-[120px] rounded-xl border border-white/10 bg-background/55 text-foreground p-3 text-sm focus:outline-none focus:ring-1 focus:ring-primary/50 w-full font-sans leading-relaxed" 
                   placeholder={"O paciente teve um atendimento nas últimas 48 horas.\n- Demonstre interesse em saber como foi.\n- Se for serviço recorrente (ex: limpeza, manutenção), ofereça já agendar o próximo.\n- Não force vendas — escute primeiro."}
                 />
               </AccordionContent>
             </AccordionItem>
 
-            <AccordionItem value="active_patient">
-              <AccordionTrigger className="px-4 hover:bg-muted/50">
-                <div className="flex flex-col items-start gap-1">
-                  <span>Paciente recorrente</span>
-                  <span className="text-xs text-muted-foreground font-normal">quando o paciente já tem consultas concluídas no histórico</span>
+            <AccordionItem value="active_patient" className="border-b border-white/10">
+              <AccordionTrigger className="px-4 hover:bg-white/5 transition-colors">
+                <div className="flex flex-col items-start gap-0.5 text-left">
+                  <span className="font-heading text-sm font-semibold text-foreground">Paciente recorrente</span>
+                  <span className="text-xs text-muted-foreground/70 font-sans font-normal">quando o paciente já tem consultas concluídas no histórico</span>
                 </div>
               </AccordionTrigger>
               <AccordionContent className="px-4 pb-4 pt-2">
                 <Textarea 
                   {...register("prompt_active_patient")} 
-                  className="min-h-[120px] text-sm" 
+                  className="min-h-[120px] rounded-xl border border-white/10 bg-background/55 text-foreground p-3 text-sm focus:outline-none focus:ring-1 focus:ring-primary/50 w-full font-sans leading-relaxed" 
                   placeholder={"Paciente já é recorrente da clínica.\n- Use tom mais íntimo e familiar — vocês já se conhecem.\n- Não repita explicações longas sobre serviços que ele já fez antes.\n- Vá direto ao ponto."}
                 />
               </AccordionContent>
             </AccordionItem>
 
-            <AccordionItem value="returning_lead">
-              <AccordionTrigger className="px-4 hover:bg-muted/50">
-                <div className="flex flex-col items-start gap-1">
-                  <span>Lead recorrente</span>
-                  <span className="text-xs text-muted-foreground font-normal">quando o paciente já conversou mas nunca agendou</span>
+            <AccordionItem value="returning_lead" className="border-b border-white/10">
+              <AccordionTrigger className="px-4 hover:bg-white/5 transition-colors">
+                <div className="flex flex-col items-start gap-0.5 text-left">
+                  <span className="font-heading text-sm font-semibold text-foreground">Lead recorrente</span>
+                  <span className="text-xs text-muted-foreground/70 font-sans font-normal">quando o paciente já conversou mas nunca agendou</span>
                 </div>
               </AccordionTrigger>
               <AccordionContent className="px-4 pb-4 pt-2">
                 <Textarea 
                   {...register("prompt_returning_lead")} 
-                  className="min-h-[120px] text-sm" 
+                  className="min-h-[120px] rounded-xl border border-white/10 bg-background/55 text-foreground p-3 text-sm focus:outline-none focus:ring-1 focus:ring-primary/50 w-full font-sans leading-relaxed" 
                   placeholder={"Paciente já conversou antes mas NUNCA agendou.\n- Seja proativa: apresente serviços e sugira datas.\n- Se houver hesitação, ofereça alternativas (horário, valor, formato).\n- Use list_services e check_availability sem esperar pedido explícito."}
                 />
               </AccordionContent>
             </AccordionItem>
 
             <AccordionItem value="reactivation" className="border-b-0">
-              <AccordionTrigger className="px-4 hover:bg-muted/50 rounded-b-lg">
-                <div className="flex flex-col items-start gap-1">
-                  <span>Reativação</span>
-                  <span className="text-xs text-muted-foreground font-normal">quando o paciente sumiu há mais de 30 dias</span>
+              <AccordionTrigger className="px-4 hover:bg-white/5 transition-colors">
+                <div className="flex flex-col items-start gap-0.5 text-left">
+                  <span className="font-heading text-sm font-semibold text-foreground">Reativação</span>
+                  <span className="text-xs text-muted-foreground/70 font-sans font-normal">quando o paciente sumiu há mais de 30 dias</span>
                 </div>
               </AccordionTrigger>
               <AccordionContent className="px-4 pb-4 pt-2">
                 <Textarea 
                   {...register("prompt_reactivation")} 
-                  className="min-h-[120px] text-sm" 
+                  className="min-h-[120px] rounded-xl border border-white/10 bg-background/55 text-foreground p-3 text-sm focus:outline-none focus:ring-1 focus:ring-primary/50 w-full font-sans leading-relaxed" 
                   placeholder={"Paciente sumiu há mais de 30 dias.\n- Receba com tom acolhedor: 'que bom ter você de volta!'.\n- Pergunte como pode ajudar agora; não pressione.\n- Se for serviço recorrente, antecipe e sugira já agendar."}
                 />
               </AccordionContent>
@@ -265,16 +265,16 @@ export function AiTab({ tenant }: { tenant: TenantProfile }) {
         </div>
       </div>
 
-      <div className="flex items-center gap-4 pt-4">
-        <Button type="submit" disabled={isPending}>
+      <div className="flex items-center gap-4 pt-4 border-t border-white/5">
+        <button type="submit" disabled={isPending} className="sofia-btn-gradient px-5 py-2.5 rounded-xl text-white font-bold text-xs shadow-md shadow-primary/20 hover:brightness-110 active:scale-95 flex items-center justify-center gap-1.5 cursor-pointer text-center disabled:opacity-50">
           {isPending ? (
-            <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+            <Loader2 className="mr-1.5 h-3.5 w-3.5 animate-spin" />
           ) : (
-            <Save className="mr-2 h-4 w-4" />
+            <Save className="mr-1.5 h-3.5 w-3.5" />
           )}
           Salvar Inteligência Artificial
-        </Button>
-        {isSuccess && <span className="text-sm text-emerald-500 font-medium">Configurações salvas com sucesso!</span>}
+        </button>
+        {isSuccess && <span className="text-xs text-emerald-400 font-sans font-semibold">Configurações salvas com sucesso!</span>}
       </div>
     </form>
   );

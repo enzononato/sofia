@@ -128,10 +128,16 @@ export function ProfessionalConfigDialog({ user, open, onOpenChange }: Props) {
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="sm:max-w-[560px] max-h-[85vh] overflow-y-auto">
-        <DialogHeader>
-          <DialogTitle>Atendimento de {user?.full_name}</DialogTitle>
-          <DialogDescription>
+      <DialogContent className="sm:max-w-[560px] max-h-[85vh] overflow-y-auto bg-background/95 border-white/10 backdrop-blur-md rounded-[28px] p-6 shadow-2xl overflow-hidden animate-in fade-in duration-200">
+        <DialogHeader className="space-y-1">
+          <div className="flex items-center gap-2 mb-1.5">
+            <span className="h-2 w-2 rounded-full bg-primary animate-pulse" />
+            <span className="font-mono text-[9px] uppercase tracking-widest text-primary font-semibold">Configuração de Atendimento</span>
+          </div>
+          <DialogTitle className="font-heading text-lg font-bold text-foreground">
+            Atendimento de {user?.full_name}
+          </DialogTitle>
+          <DialogDescription className="text-xs text-muted-foreground/80 font-sans mt-0.5 leading-relaxed">
             Defina quais serviços este profissional realiza e seus horários de trabalho. A Sofia
             usa isso para agendar pacientes com o profissional certo.
           </DialogDescription>
@@ -139,18 +145,18 @@ export function ProfessionalConfigDialog({ user, open, onOpenChange }: Props) {
 
         {isLoading ? (
           <div className="flex justify-center p-12">
-            <Loader2 className="h-8 w-8 animate-spin text-muted-foreground" />
+            <Loader2 className="h-8 w-8 animate-spin text-primary" />
           </div>
         ) : (
           <div className="space-y-8 pt-2">
             {/* ── Services ─────────────────────────────────────────── */}
             <section className="space-y-3">
               <div className="flex items-center gap-2">
-                <Briefcase className="h-4 w-4 text-muted-foreground" />
-                <h3 className="text-sm font-semibold">Serviços que realiza</h3>
+                <Briefcase className="h-4 w-4 text-primary" />
+                <h3 className="font-heading text-sm font-semibold text-foreground">Serviços que realiza</h3>
               </div>
               {activeServices.length === 0 ? (
-                <p className="text-sm text-muted-foreground">
+                <p className="text-xs text-muted-foreground font-sans">
                   Nenhum serviço ativo cadastrado. Cadastre serviços primeiro na aba Serviços.
                 </p>
               ) : (
@@ -158,17 +164,17 @@ export function ProfessionalConfigDialog({ user, open, onOpenChange }: Props) {
                   {activeServices.map((s) => (
                     <label
                       key={s.id}
-                      className="flex items-center gap-2 rounded-lg border border-border/50 px-3 py-2 cursor-pointer hover:bg-muted/30 transition-colors"
+                      className="flex items-center gap-2.5 rounded-xl border border-white/10 bg-white/5 px-3.5 py-2.5 cursor-pointer hover:bg-white/10 transition-colors"
                     >
                       <input
                         type="checkbox"
                         checked={selected.has(s.id)}
                         onChange={() => toggleService(s.id)}
-                        className="h-4 w-4 rounded border-gray-300 text-primary focus:ring-primary"
+                        className="h-4.5 w-4.5 rounded border-white/10 text-primary bg-background/50 accent-primary cursor-pointer animate-in zoom-in-50 duration-200"
                       />
-                      <span className="text-sm truncate">
+                      <span className="text-xs font-heading font-semibold text-foreground truncate leading-tight">
                         {s.name}{" "}
-                        <span className="text-xs text-muted-foreground">({s.duration_minutes}min)</span>
+                        <span className="text-[10px] text-muted-foreground/70 font-mono">({s.duration_minutes}min)</span>
                       </span>
                     </label>
                   ))}
@@ -179,15 +185,15 @@ export function ProfessionalConfigDialog({ user, open, onOpenChange }: Props) {
             {/* ── Work hours ───────────────────────────────────────── */}
             <section className="space-y-3">
               <div className="flex items-center gap-2">
-                <Clock className="h-4 w-4 text-muted-foreground" />
-                <h3 className="text-sm font-semibold">Horários de trabalho</h3>
+                <Clock className="h-4 w-4 text-primary" />
+                <h3 className="font-heading text-sm font-semibold text-foreground">Horários de trabalho</h3>
               </div>
-              <p className="text-xs text-muted-foreground -mt-1">
+              <p className="text-xs text-muted-foreground/80 leading-relaxed -mt-1 font-sans">
                 Adicione blocos por dia. O intervalo entre dois blocos (ex.: 08:00–12:00 e 13:00–18:00) é
                 o almoço. Dias sem bloco = não atende. Sem nenhum horário definido, a Sofia usa o horário geral da clínica.
               </p>
 
-              <div className="space-y-2">
+              <div className="space-y-3">
                 {WEEKDAYS.map((day) => {
                   const dayBlocks = blocks
                     .map((b, idx) => ({ b, idx }))
@@ -195,12 +201,12 @@ export function ProfessionalConfigDialog({ user, open, onOpenChange }: Props) {
                   return (
                     <div
                       key={day.id}
-                      className="flex flex-col sm:flex-row sm:items-start gap-2 rounded-lg border border-border/50 p-3"
+                      className="flex flex-col sm:flex-row sm:items-start gap-3 rounded-2xl border border-white/10 p-4 bg-background/45 backdrop-blur-md shadow-md"
                     >
-                      <div className="w-24 shrink-0 text-sm font-medium pt-1.5">{day.label}</div>
+                      <div className="w-24 shrink-0 text-xs font-heading font-semibold text-foreground pt-1.5">{day.label}</div>
                       <div className="flex-1 space-y-2">
                         {dayBlocks.length === 0 ? (
-                          <span className="text-xs text-muted-foreground italic">Não atende</span>
+                          <span className="text-xs text-muted-foreground/60 italic font-sans block pt-0.5">Não atende</span>
                         ) : (
                           dayBlocks.map(({ b, idx }) => (
                             <div key={idx} className="flex items-center gap-2">
@@ -208,19 +214,19 @@ export function ProfessionalConfigDialog({ user, open, onOpenChange }: Props) {
                                 type="time"
                                 value={b.start_time}
                                 onChange={(e) => updateBlock(idx, "start_time", e.target.value)}
-                                className="h-9 rounded-md border border-input bg-background px-2 text-sm"
+                                className="h-9 w-20 px-2 rounded-lg border border-white/10 bg-background/55 text-center text-xs text-foreground focus:ring-1 focus:ring-primary/50 focus:outline-none transition-all"
                               />
-                              <span className="text-muted-foreground text-sm">até</span>
+                              <span className="text-muted-foreground/50 text-xs font-sans">até</span>
                               <input
                                 type="time"
                                 value={b.end_time}
                                 onChange={(e) => updateBlock(idx, "end_time", e.target.value)}
-                                className="h-9 rounded-md border border-input bg-background px-2 text-sm"
+                                className="h-9 w-20 px-2 rounded-lg border border-white/10 bg-background/55 text-center text-xs text-foreground focus:ring-1 focus:ring-primary/50 focus:outline-none transition-all"
                               />
                               <button
                                 type="button"
                                 onClick={() => removeBlock(idx)}
-                                className="text-muted-foreground hover:text-destructive p-1"
+                                className="text-muted-foreground/60 hover:text-destructive p-1.5 hover:bg-white/5 rounded-lg transition-colors cursor-pointer"
                                 aria-label="Remover bloco"
                               >
                                 <Trash2 className="h-4 w-4" />
@@ -231,7 +237,7 @@ export function ProfessionalConfigDialog({ user, open, onOpenChange }: Props) {
                         <button
                           type="button"
                           onClick={() => addBlock(day.id)}
-                          className="text-xs text-primary hover:underline flex items-center gap-1"
+                          className="text-xs text-primary hover:text-primary/80 flex items-center gap-1 font-mono uppercase tracking-wider font-semibold cursor-pointer pt-1 active:scale-95 transition-all w-fit"
                         >
                           <Plus className="h-3 w-3" /> Adicionar bloco
                         </button>
@@ -243,21 +249,27 @@ export function ProfessionalConfigDialog({ user, open, onOpenChange }: Props) {
             </section>
 
             {error && (
-              <p className="text-sm text-destructive border border-destructive/40 bg-destructive/5 rounded-md p-2">
-                {error}
-              </p>
+              <p className="text-sm text-destructive font-sans font-medium">{error}</p>
             )}
           </div>
         )}
 
-        <DialogFooter className="pt-4">
-          <Button type="button" variant="outline" onClick={() => onOpenChange(false)}>
+        <DialogFooter className="pt-4 border-t border-white/10 flex flex-col-reverse sm:flex-row justify-end gap-3 mt-4">
+          <button
+            type="button"
+            onClick={() => onOpenChange(false)}
+            className="px-5 py-2.5 rounded-xl font-semibold text-muted-foreground hover:bg-white/5 hover:text-foreground text-xs transition-all cursor-pointer text-center"
+          >
             Cancelar
-          </Button>
-          <Button type="button" onClick={handleSave} disabled={saving || isLoading}>
-            {saving && <Loader2 className="mr-2 h-4 w-4 animate-spin" />}
-            Salvar Atendimento
-          </Button>
+          </button>
+          <button
+            onClick={handleSave}
+            disabled={saving || isLoading}
+            className="sofia-btn-gradient px-5 py-2.5 rounded-xl text-white font-bold text-xs shadow-md shadow-primary/20 hover:brightness-110 active:scale-95 flex items-center justify-center gap-1.5 cursor-pointer text-center disabled:opacity-50"
+          >
+            {saving && <Loader2 className="h-3.5 w-3.5 animate-spin" />}
+            Salvar Configurações
+          </button>
         </DialogFooter>
       </DialogContent>
     </Dialog>

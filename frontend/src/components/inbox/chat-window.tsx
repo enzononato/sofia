@@ -291,44 +291,44 @@ export function ChatWindow({ contact }: ChatWindowProps) {
   const displayMessages = messages ? [...messages].reverse() : [];
 
   return (
-    <div className="flex flex-col h-full min-h-0 overflow-hidden bg-background/50">
+    <div className="flex flex-col h-full min-h-0 overflow-hidden bg-background/10">
       {/* ── Header ── */}
-      <div className="flex-shrink-0 flex items-center gap-4 p-4 border-b border-border/50 bg-card/80 backdrop-blur-md shadow-sm z-10">
-        <Avatar className="h-10 w-10 border border-border/50">
+      <div className="flex-shrink-0 flex items-center gap-4 p-4 border-b border-white/10 bg-background/45 backdrop-blur-md z-10">
+        <Avatar className="h-10 w-10 border border-white/10 flex-shrink-0">
           <AvatarImage src={contact.profile_picture_url || ""} />
           <AvatarFallback className="bg-primary/5 text-primary">
             <User className="h-4 w-4" />
           </AvatarFallback>
         </Avatar>
-        <div className="flex flex-col flex-1">
+        <div className="flex flex-col flex-1 min-w-0">
           <div className="flex items-center gap-2">
-            <span className="font-semibold">{contact.full_name}</span>
+            <span className="font-heading font-semibold text-sm text-foreground truncate">{contact.full_name}</span>
             {contact.whatsapp_name && contact.whatsapp_name !== contact.full_name && (
-              <span className="text-xs text-muted-foreground">~{contact.whatsapp_name}</span>
+              <span className="text-[10px] text-muted-foreground truncate opacity-70">~{contact.whatsapp_name}</span>
             )}
           </div>
-          <div className="flex items-center text-xs text-muted-foreground gap-1">
+          <div className="flex items-center text-[11px] text-muted-foreground gap-1 mt-0.5 opacity-80">
             <Phone className="h-3 w-3" />
-            {contact.phone || "Sem telefone"}
+            <span className="font-mono">{contact.phone || "Sem telefone"}</span>
           </div>
         </div>
 
         {/* AI Handoff Toggle */}
-        <div className="flex items-center gap-3 bg-background/50 px-3 py-2 rounded-xl border border-border/50">
-          <span className="text-xs font-medium">Sofia:</span>
+        <div className="flex items-center gap-3 bg-background/30 px-3 py-2 rounded-xl border border-white/10">
+          <span className="text-[10px] font-mono uppercase tracking-wider text-muted-foreground opacity-80">Secretária IA:</span>
           <button
             onClick={handleToggleAI}
             disabled={isUpdatingStatus}
             className={cn(
-              "flex items-center gap-1.5 px-2.5 py-1.5 rounded-md text-xs font-semibold transition-all",
+              "flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-xs font-semibold transition-all cursor-pointer",
               contact.ai_paused
-                ? "bg-amber-500/10 text-amber-500 hover:bg-amber-500/20"
-                : "bg-emerald-500/10 text-emerald-500 hover:bg-emerald-500/20",
+                ? "bg-amber-500/10 text-amber-500 border border-amber-500/20 hover:bg-amber-500/20"
+                : "bg-emerald-500/10 text-emerald-500 border border-emerald-500/20 hover:bg-emerald-500/20",
               isUpdatingStatus && "opacity-50 cursor-not-allowed"
             )}
           >
             {isUpdatingStatus ? (
-              <Loader2 className="h-3.5 w-3.5 animate-spin" />
+              <Loader2 className="h-3 w-3 animate-spin" />
             ) : contact.ai_paused ? (
               <><PauseCircle className="h-3.5 w-3.5" /> Pausada</>
             ) : (
@@ -339,28 +339,29 @@ export function ChatWindow({ contact }: ChatWindowProps) {
       </div>
 
       {/* ── Messages ── */}
-      <div ref={scrollContainerRef} className="flex-1 min-h-0 overflow-y-auto p-4 flex flex-col">
+      <div ref={scrollContainerRef} className="flex-1 min-h-0 overflow-y-auto p-4 flex flex-col space-y-4">
         {isLoading ? (
           <div className="flex flex-col gap-4">
             {[1, 2, 3].map((i) => (
               <div
                 key={i}
                 className={cn(
-                  "max-w-[70%] rounded-2xl p-4 animate-pulse",
+                  "max-w-[70%] rounded-2xl p-4 animate-pulse border border-white/5",
                   i % 2 === 0
-                    ? "bg-primary/20 self-end rounded-br-none"
-                    : "bg-muted self-start rounded-bl-none"
+                    ? "bg-primary/10 self-end rounded-br-none"
+                    : "bg-white/5 self-start rounded-bl-none"
                 )}
               >
-                <div className="h-4 w-32 bg-background/50 rounded mb-2" />
-                <div className="h-3 w-20 bg-background/50 rounded" />
+                <div className="h-4 w-32 bg-white/5 rounded mb-2" />
+                <div className="h-3 w-20 bg-white/5 rounded" />
               </div>
             ))}
           </div>
         ) : displayMessages.length === 0 ? (
-          <div className="flex-1 flex flex-col items-center justify-center text-muted-foreground">
-            <Bot className="h-12 w-12 mb-4 opacity-20" />
-            <p>Nenhuma mensagem ainda.</p>
+          <div className="flex-1 flex flex-col items-center justify-center text-muted-foreground/50">
+            <Bot className="h-12 w-12 mb-4 opacity-30 animate-pulse" />
+            <p className="font-heading text-sm font-semibold">Nenhuma mensagem ainda</p>
+            <p className="text-xs mt-1">A conversa está vazia.</p>
           </div>
         ) : (
           <>
@@ -376,8 +377,8 @@ export function ChatWindow({ contact }: ChatWindowProps) {
                 return (
                   <div key={msg.id} className="contents">
                   {showDaySep && (
-                    <div className="self-center my-2">
-                      <span className="text-[10px] font-medium text-muted-foreground bg-muted/60 rounded-full px-3 py-1">
+                    <div className="self-center my-3">
+                      <span className="text-[10px] font-mono uppercase tracking-wider text-muted-foreground/80 bg-white/5 border border-white/5 rounded-full px-3 py-1">
                         {dayLabel(msgDate)}
                       </span>
                     </div>
@@ -390,23 +391,23 @@ export function ChatWindow({ contact }: ChatWindowProps) {
                   >
                     <div
                       className={cn(
-                        "px-4 py-2.5 rounded-2xl text-sm shadow-sm",
+                        "px-4 py-2.5 rounded-2xl text-sm shadow-md font-sans border",
                         isOutbound
-                          ? "bg-primary text-primary-foreground rounded-br-none"
-                          : "bg-card border border-border/50 text-card-foreground rounded-bl-none"
+                          ? "bg-primary text-primary-foreground border-primary/20 rounded-br-none"
+                          : "bg-white/5 border-white/10 text-foreground rounded-bl-none"
                       )}
                     >
                       <MessageContent msg={msg} onOpenImage={setLightboxImage} />
                     </div>
-                    <div className="flex items-center gap-1 mt-1 px-1 text-[10px] text-muted-foreground">
-                      <span>{format(new Date(msg.created_at), "HH:mm", { locale: ptBR })}</span>
+                    <div className="flex items-center gap-1 mt-1.5 px-1 text-[10px] text-muted-foreground/60 font-mono">
+                      <span>{format(new Date(msg.created_at), "HH:mm")}</span>
                       {isOutbound && isAI && (
-                        <span className="flex items-center gap-1 ml-1 text-primary/70 font-medium">
+                        <span className="flex items-center gap-1 ml-1.5 text-primary/80 font-semibold uppercase tracking-wider text-[9px]">
                           <Bot className="h-3 w-3" /> Sofia
                         </span>
                       )}
                       {isOutbound && !isAI && (
-                        <span className="flex items-center gap-1 ml-1 text-muted-foreground font-medium">
+                        <span className="flex items-center gap-1 ml-1.5 text-muted-foreground font-semibold uppercase tracking-wider text-[9px]">
                           <User className="h-3 w-3" /> Equipe
                         </span>
                       )}
@@ -421,7 +422,7 @@ export function ChatWindow({ contact }: ChatWindowProps) {
       </div>
 
       {/* ── Input Bar (WhatsApp Web style) ── */}
-      <div className="flex-shrink-0 bg-card/80 backdrop-blur-md border-t border-border/50">
+      <div className="flex-shrink-0 bg-background/45 backdrop-blur-md border-t border-white/10 p-3">
         {/* Hidden file input */}
         <input
           ref={fileInputRef}
@@ -432,18 +433,18 @@ export function ChatWindow({ contact }: ChatWindowProps) {
 
         {isRecording ? (
           /* ── Recording Mode ── */
-          <div className="flex items-center gap-3 px-4 py-3">
+          <div className="flex items-center gap-3">
             <button
               onClick={cancelRecording}
-              className="h-10 w-10 rounded-full flex items-center justify-center text-destructive hover:bg-destructive/10 transition-colors"
+              className="h-10 w-10 rounded-full flex items-center justify-center text-destructive hover:bg-destructive/10 transition-colors cursor-pointer"
               title="Cancelar"
             >
               <X className="h-5 w-5" />
             </button>
 
-            <div className="flex-1 flex items-center gap-3 bg-destructive/5 rounded-full px-4 py-2">
+            <div className="flex-1 flex items-center gap-3 bg-destructive/5 border border-destructive/10 rounded-full px-4 py-2">
               <span className="w-2.5 h-2.5 rounded-full bg-red-500 animate-pulse" />
-              <span className="text-sm font-mono text-destructive font-medium">
+              <span className="text-sm font-mono text-destructive font-semibold">
                 {formatTime(recordingTime)}
               </span>
               <span className="text-xs text-muted-foreground">Gravando áudio...</span>
@@ -451,7 +452,7 @@ export function ChatWindow({ contact }: ChatWindowProps) {
 
             <button
               onClick={stopRecording}
-              className="h-11 w-11 rounded-full bg-primary flex items-center justify-center text-primary-foreground shadow-md shadow-primary/20 hover:bg-primary/90 transition-colors"
+              className="h-11 w-11 rounded-full bg-primary flex items-center justify-center text-primary-foreground shadow-lg shadow-primary/25 hover:brightness-110 transition-all active:scale-95 cursor-pointer"
               title="Enviar áudio"
             >
               <Send className="h-5 w-5 ml-0.5" />
@@ -459,24 +460,24 @@ export function ChatWindow({ contact }: ChatWindowProps) {
           </div>
         ) : (
           /* ── Normal Mode ── */
-          <form onSubmit={handleSend} className="flex items-center gap-2 px-4 py-3">
+          <form onSubmit={handleSend} className="flex items-center gap-2">
             {/* Attachment Button */}
             <div className="relative">
               <button
                 type="button"
                 onClick={() => setShowAttachMenu((v) => !v)}
-                className="h-10 w-10 rounded-full flex items-center justify-center text-muted-foreground hover:text-foreground hover:bg-muted/50 transition-colors"
+                className="h-10 w-10 rounded-full flex items-center justify-center text-muted-foreground hover:text-foreground hover:bg-white/5 transition-colors cursor-pointer"
                 title="Anexar"
               >
                 <Paperclip className="h-5 w-5" />
               </button>
 
               {showAttachMenu && (
-                <div className="absolute bottom-12 left-0 bg-card border border-border/50 rounded-xl shadow-xl p-2 flex flex-col gap-1 min-w-[160px] z-20 animate-in slide-in-from-bottom-2 fade-in duration-200">
+                <div className="absolute bottom-12 left-0 bg-background border border-white/10 rounded-2xl shadow-2xl p-2 flex flex-col gap-1 min-w-[160px] z-20 animate-in slide-in-from-bottom-2 duration-200">
                   <button
                     type="button"
                     onClick={() => handleFileSelect("image/*")}
-                    className="flex items-center gap-3 px-3 py-2 text-sm rounded-lg hover:bg-muted/50 transition-colors"
+                    className="flex items-center gap-3 px-3 py-2 text-sm rounded-lg hover:bg-white/5 transition-colors text-left text-foreground cursor-pointer font-sans"
                   >
                     <ImageIcon className="h-4 w-4 text-emerald-500" />
                     Fotos
@@ -484,7 +485,7 @@ export function ChatWindow({ contact }: ChatWindowProps) {
                   <button
                     type="button"
                     onClick={() => handleFileSelect(".pdf,.doc,.docx,.xls,.xlsx,.txt,.csv")}
-                    className="flex items-center gap-3 px-3 py-2 text-sm rounded-lg hover:bg-muted/50 transition-colors"
+                    className="flex items-center gap-3 px-3 py-2 text-sm rounded-lg hover:bg-white/5 transition-colors text-left text-foreground cursor-pointer font-sans"
                   >
                     <FileText className="h-4 w-4 text-blue-500" />
                     Documento
@@ -500,8 +501,8 @@ export function ChatWindow({ contact }: ChatWindowProps) {
               value={inputText}
               onChange={(e) => setInputText(e.target.value)}
               onFocus={() => setShowAttachMenu(false)}
-              placeholder="Digitar mensagem"
-              className="flex-1 bg-background/80 border border-border/50 rounded-full px-5 h-11 text-sm placeholder:text-muted-foreground focus:outline-none focus:ring-2 focus:ring-primary/30 focus:border-primary/50 transition-all"
+              placeholder="Digitar mensagem..."
+              className="flex-1 bg-background/55 border border-white/10 rounded-full px-5 h-11 text-sm placeholder:text-muted-foreground/60 focus:outline-none focus:ring-1 focus:ring-primary/50 transition-all text-foreground font-sans"
               disabled={isBusy}
             />
 
@@ -510,7 +511,7 @@ export function ChatWindow({ contact }: ChatWindowProps) {
               <Button
                 type="submit"
                 size="icon"
-                className="rounded-full h-11 w-11 shrink-0 shadow-md shadow-primary/20"
+                className="rounded-full h-11 w-11 shrink-0 shadow-lg shadow-primary/20 cursor-pointer"
                 disabled={isBusy}
               >
                 {isBusy ? (
@@ -525,8 +526,8 @@ export function ChatWindow({ contact }: ChatWindowProps) {
                 onClick={startRecording}
                 disabled={isBusy}
                 className={cn(
-                  "h-11 w-11 rounded-full flex items-center justify-center shrink-0 transition-colors",
-                  "text-muted-foreground hover:text-foreground hover:bg-muted/50",
+                  "h-11 w-11 rounded-full flex items-center justify-center shrink-0 transition-colors cursor-pointer",
+                  "text-muted-foreground hover:text-foreground hover:bg-white/5",
                   isBusy && "opacity-50 cursor-not-allowed"
                 )}
                 title="Gravar áudio"

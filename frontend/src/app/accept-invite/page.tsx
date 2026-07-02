@@ -45,35 +45,39 @@ function AcceptInviteInner() {
   };
 
   return (
-    <div className="min-h-screen flex items-center justify-center bg-background p-4">
-      <div className="w-full max-w-sm rounded-2xl border border-border/50 bg-card p-8 shadow-lg">
+    <div className="min-h-screen flex items-center justify-center bg-background p-4 relative overflow-hidden">
+      {/* Background glow elements */}
+      <div className="absolute top-1/4 left-1/4 -translate-x-1/2 -translate-y-1/2 w-80 h-80 rounded-full bg-primary/10 blur-[120px] pointer-events-none" />
+      <div className="absolute bottom-1/4 right-1/4 translate-x-1/2 translate-y-1/2 w-80 h-80 rounded-full bg-indigo-500/10 blur-[120px] pointer-events-none" />
+
+      <div className="w-full max-w-md bg-white/[0.03] backdrop-blur-xl border border-white/10 p-8 rounded-[28px] shadow-2xl relative z-10 animate-in fade-in slide-in-from-bottom-4 duration-300">
         <div className="flex flex-col items-center mb-6">
-          <div className="w-12 h-12 bg-primary/10 text-primary rounded-xl flex items-center justify-center ring-1 ring-primary/20 mb-3">
-            <Bot size={24} />
+          <div className="w-14 h-14 bg-gradient-to-tr from-violet-600 to-indigo-600 text-white rounded-2xl flex items-center justify-center shadow-lg shadow-primary/20 mb-4 ring-1 ring-white/10">
+            <Bot size={28} />
           </div>
-          <h1 className="text-xl font-bold tracking-tight">Ativar seu acesso</h1>
-          <p className="text-sm text-muted-foreground mt-1 text-center">
-            Defina seu nome e senha para entrar na equipe.
+          <h1 className="font-heading text-2xl font-bold tracking-tight text-foreground text-center">Ativar seu acesso</h1>
+          <p className="text-xs text-muted-foreground/80 mt-1.5 text-center font-sans max-w-[280px]">
+            Defina seu nome e senha para entrar na equipe da clínica.
           </p>
         </div>
 
         {!token ? (
-          <p className="text-sm text-destructive text-center">Link de convite inválido ou incompleto.</p>
+          <p className="text-xs text-destructive text-center font-sans font-medium">Link de convite inválido ou incompleto.</p>
         ) : (
           <form onSubmit={handleSubmit} className="space-y-4">
-            <div className="space-y-2">
-              <Label htmlFor="full_name">Nome completo</Label>
-              <Input id="full_name" value={fullName} onChange={(e) => setFullName(e.target.value)} required placeholder="Seu nome" />
+            <div className="space-y-1.5">
+              <Label htmlFor="full_name" className="font-mono text-[10px] uppercase tracking-wider text-muted-foreground/80 block">Nome completo</Label>
+              <Input id="full_name" value={fullName} onChange={(e) => setFullName(e.target.value)} required placeholder="Seu nome" className="h-11 rounded-xl border border-white/10 bg-background/55 text-foreground px-4 text-sm focus:outline-none focus:ring-1 focus:ring-primary/50 focus:border-primary/50 transition-all w-full" />
             </div>
-            <div className="space-y-2">
-              <Label htmlFor="password">Senha (mín. 8 caracteres)</Label>
-              <Input id="password" type="password" value={password} onChange={(e) => setPassword(e.target.value)} required />
+            <div className="space-y-1.5">
+              <Label htmlFor="password" className="font-mono text-[10px] uppercase tracking-wider text-muted-foreground/80 block">Senha (mín. 8 caracteres)</Label>
+              <Input id="password" type="password" value={password} onChange={(e) => setPassword(e.target.value)} required className="h-11 rounded-xl border border-white/10 bg-background/55 text-foreground px-4 text-sm focus:outline-none focus:ring-1 focus:ring-primary/50 focus:border-primary/50 transition-all w-full" />
             </div>
-            {error && <p className="text-sm text-destructive">{error}</p>}
-            <Button type="submit" className="w-full" disabled={isSubmitting}>
-              {isSubmitting && <Loader2 className="mr-2 h-4 w-4 animate-spin" />}
+            {error && <p className="text-xs text-destructive font-sans font-medium text-center">{error}</p>}
+            <button type="submit" disabled={isSubmitting} className="sofia-btn-gradient w-full h-11 rounded-xl text-white font-bold text-xs shadow-md shadow-primary/20 hover:brightness-110 active:scale-95 flex items-center justify-center gap-1.5 cursor-pointer text-center disabled:opacity-50 mt-2">
+              {isSubmitting && <Loader2 className="mr-1.5 h-3.5 w-3.5 animate-spin" />}
               Ativar acesso
-            </Button>
+            </button>
           </form>
         )}
       </div>
@@ -83,7 +87,7 @@ function AcceptInviteInner() {
 
 export default function AcceptInvitePage() {
   return (
-    <Suspense fallback={<div className="min-h-screen flex items-center justify-center"><Loader2 className="h-8 w-8 animate-spin text-muted-foreground" /></div>}>
+    <Suspense fallback={<div className="min-h-screen flex items-center justify-center bg-background"><Loader2 className="h-8 w-8 animate-spin text-primary" /></div>}>
       <AcceptInviteInner />
     </Suspense>
   );
