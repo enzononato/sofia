@@ -128,7 +128,7 @@ export function ProfessionalConfigDialog({ user, open, onOpenChange }: Props) {
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="sm:max-w-[560px] max-h-[85vh] overflow-y-auto bg-background/95 border-white/10 backdrop-blur-md rounded-[28px] p-6 shadow-2xl overflow-hidden animate-in fade-in duration-200">
+      <DialogContent className="sm:max-w-[560px] max-h-[85vh] overflow-y-auto bg-background/95 border-white/10 backdrop-blur-md rounded-[28px] p-6 shadow-2xl animate-in fade-in duration-200">
         <DialogHeader className="space-y-1">
           <div className="flex items-center gap-2 mb-1.5">
             <span className="h-2 w-2 rounded-full bg-primary animate-pulse" />
