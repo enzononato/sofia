@@ -590,14 +590,10 @@ async def _generate_and_send(
             )
             await db.commit()
 
-            # Mark everything the AI just read as answered NOW (generation time),
-            # not when the reply finishes sending. Any message that arrives during
-            # the upcoming typing/send delay is newer than this mark, so its own
-            # debounce will pick it up instead of it being swallowed by this reply.
+            # Newest message this reply accounts for. We do NOT mark it answered
+            # yet — only once we actually commit to sending (below), so a reply
+            # that gets superseded never marks its burst answered.
             newest_answered = max(m.created_at for m in unanswered)
-            prev = _answered_watermark.get(contact_id)
-            if prev is None or newest_answered > prev:
-                _answered_watermark[contact_id] = newest_answered
         except Exception:
             await db.rollback()
             raise
@@ -607,7 +603,16 @@ async def _generate_and_send(
         await wa_service.mark_messages_as_read(instance_token, wa_ids)
 
     # ── Partitioned, human-paced delivery ────────────────────────────────────
+    # A human who is mid-reply when a new message lands folds it into one answer
+    # instead of firing a second. We emulate that: right before the FIRST send
+    # (after the typing delay — the widest window for a new message to arrive),
+    # re-check for any inbound newer than this burst. If one exists, abort: the
+    # new message already restarted the debounce, which will re-run over the whole
+    # burst and produce a single combined reply. The "answered" watermark is set
+    # only once we commit to sending, so an aborted reply never marks its burst
+    # answered (it gets re-read and answered together with the new message).
     parts = humanizer.split_reply(reply_text)
+    committed = False
     for part in parts:
         if not part:
             continue
@@ -615,6 +620,14 @@ async def _generate_and_send(
             delay = humanizer.typing_delay_seconds(part)
             await wa_service.send_presence(instance_token, phone, "composing", int(delay * 1000))
             await asyncio.sleep(delay)
+        if not committed:
+            if await _has_newer_inbound(tenant.id, contact_id, newest_answered):
+                logger.info("reply_superseded_by_new_message", extra=log_ctx)
+                return
+            prev = _answered_watermark.get(contact_id)
+            if prev is None or newest_answered > prev:
+                _answered_watermark[contact_id] = newest_answered
+            committed = True
         await wa_service.send_text_message(instance_token=instance_token, phone=phone, text=part)
         await _save_outbound(tenant.id, contact_id, part, model_used)
 
@@ -665,6 +678,27 @@ def _decode_data_uri(media_url: str) -> bytes | None:
         return base64.b64decode(media_url.split(",", 1)[1])
     except Exception:
         return None
+
+
+async def _has_newer_inbound(
+    tenant_id: uuid.UUID, contact_id: uuid.UUID, since: datetime
+) -> bool:
+    """True if the contact sent any inbound message after `since` (the newest
+    message the pending reply accounts for). Used to detect that the patient kept
+    talking while Sofia was generating/typing, so the reply can be aborted and
+    folded into a single combined answer."""
+    async with AsyncSessionLocal() as db:
+        row = await db.scalar(
+            select(Message.id)
+            .where(
+                Message.tenant_id == tenant_id,
+                Message.contact_id == contact_id,
+                Message.direction == MessageDirection.INBOUND,
+                Message.created_at > since,
+            )
+            .limit(1)
+        )
+        return row is not None
 
 
 async def _collect_unanswered(
