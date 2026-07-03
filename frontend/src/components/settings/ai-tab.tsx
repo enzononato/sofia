@@ -37,8 +37,9 @@ export function AiTab({ tenant }: { tenant: TenantProfile }) {
   // ── Scheduling mode (capacity × per-professional) ──────────────────────────
   // Self-contained: saves on select via the deep-merge PATCH, independent of the
   // main AI form below, so it never clobbers the other ai_config keys.
+  // Per-professional is the default: only an explicit "capacity" shows capacity.
   const [schedulingMode, setSchedulingMode] = useState<"capacity" | "per_professional">(
-    tenant.ai_config?.scheduling_mode === "per_professional" ? "per_professional" : "capacity"
+    tenant.ai_config?.scheduling_mode === "capacity" ? "capacity" : "per_professional"
   );
   const [modeSaving, setModeSaving] = useState(false);
   const [modeSaved, setModeSaved] = useState(false);
@@ -75,7 +76,8 @@ export function AiTab({ tenant }: { tenant: TenantProfile }) {
       system_prompt: defaultValues.system_prompt || "",
       temperature: defaultValues.temperature || 0.7,
       max_output_tokens: defaultValues.max_output_tokens || 1024,
-      multimodal_enabled: defaultValues.multimodal_enabled || false,
+      // Multimodal defaults ON (only an explicit false disables it).
+      multimodal_enabled: defaultValues.multimodal_enabled ?? true,
       prompt_first_contact: defaultValues.prompt_first_contact || "",
       prompt_imminent_appointment: defaultValues.prompt_imminent_appointment || "",
       prompt_post_appointment: defaultValues.prompt_post_appointment || "",

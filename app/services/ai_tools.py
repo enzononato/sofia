@@ -298,7 +298,15 @@ async def execute_tool(
     logger.info("Executing tool '%s' args=%s tenant=%s", name, args, tenant_id)
 
     settings_ = tenant_settings or {}
-    per_prof = (ai_config or {}).get("scheduling_mode") == SCHEDULING_PER_PROFESSIONAL
+    # Per-professional scheduling is the DEFAULT (absence of the key = on). A clinic
+    # can still switch to capacity explicitly in Settings → AI. Safety net: if the
+    # clinic hasn't linked any service to a professional yet, fall back to capacity
+    # so Sofia can still book during initial setup instead of finding no bookable
+    # services (per-professional hides services nobody performs).
+    mode = (ai_config or {}).get("scheduling_mode") or SCHEDULING_PER_PROFESSIONAL
+    per_prof = mode == SCHEDULING_PER_PROFESSIONAL
+    if per_prof and not await _tenant_has_professional_setup(db, tenant_id):
+        per_prof = False
 
     if name == "list_services":
         return await _list_services(db, tenant_id, per_prof)
@@ -1114,6 +1122,21 @@ async def _resolve_service(
             select(Service).where(Service.id == sid, Service.tenant_id == tenant_id)
         )
     ).scalar_one_or_none()
+
+
+async def _tenant_has_professional_setup(
+    db: AsyncSession, tenant_id: uuid.UUID
+) -> bool:
+    """True if at least one of the clinic's services is linked to a professional.
+    Used to decide whether per-professional scheduling can operate, or should
+    gracefully fall back to capacity while the clinic is still being set up."""
+    row = await db.scalar(
+        select(professional_services.c.service_id)
+        .join(Service, Service.id == professional_services.c.service_id)
+        .where(Service.tenant_id == tenant_id)
+        .limit(1)
+    )
+    return row is not None
 
 
 async def _professionals_for_service(

@@ -386,7 +386,9 @@ async def _process_inbound_message(tenant: Tenant, data: dict, request_id: str |
 
         instance_token = _instance_token(tenant)
         ai_cfg = tenant.ai_config or {}
-        multimodal_enabled = bool(ai_cfg.get("multimodal_enabled", False))
+        # Multimodal is ON by default (absence of the key = enabled); a clinic can
+        # still turn it off explicitly in Settings → AI.
+        multimodal_enabled = bool(ai_cfg.get("multimodal_enabled", True))
 
         media_type: str | None = None
         media_mime_type: str | None = None
