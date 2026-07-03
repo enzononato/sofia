@@ -16,6 +16,16 @@ from app.config import settings
 # extremely unlikely to appear in natural Portuguese text.
 SPLIT_MARKER = "[[BREAK]]"
 
+# Hard ceiling on parts for ANY reply (marker-based or fallback). A human doesn't
+# send 5 WhatsApp bubbles in a row for one answer — beyond this, parts are merged
+# back together (favors one longer message over a spammy burst).
+MAX_PARTS = 3
+
+# A part shorter than this reads as an orphaned fragment (e.g. a lone "Combinado!"
+# or a trailing question by itself) rather than an intentional separate thought.
+# Fallback splitting merges such tails into the previous part.
+MIN_PART_CHARS = 20
+
 
 def split_reply(text: str) -> list[str]:
     """
@@ -36,7 +46,7 @@ def split_reply(text: str) -> list[str]:
     if SPLIT_MARKER in cleaned:
         parts = [p.strip() for p in cleaned.split(SPLIT_MARKER)]
         parts = [p for p in parts if p]
-        return parts or [cleaned.replace(SPLIT_MARKER, " ").strip()]
+        return _normalize_parts(parts) if parts else [cleaned.replace(SPLIT_MARKER, " ").strip()]
 
     if not settings.RESPONSE_SPLIT_ENABLED:
         return [cleaned]
@@ -45,7 +55,36 @@ def split_reply(text: str) -> list[str]:
     if len(cleaned) <= settings.RESPONSE_SPLIT_MAX_CHARS:
         return [cleaned]
 
-    return _split_by_length(cleaned, settings.RESPONSE_SPLIT_MAX_CHARS)
+    return _normalize_parts(_split_by_length(cleaned, settings.RESPONSE_SPLIT_MAX_CHARS))
+
+
+def _normalize_parts(parts: list[str]) -> list[str]:
+    """
+    Post-process split parts so they read like intentional separate thoughts,
+    not mechanical fragments:
+      1. Merge any part shorter than MIN_PART_CHARS into its neighbor — a lone
+         short tail (e.g. a trailing "Quer agendar?") reads as an orphaned
+         fragment, not a deliberate second message.
+      2. Cap the total at MAX_PARTS by merging from the end inward — a human
+         doesn't send a 5-message burst for one answer.
+    """
+    if len(parts) <= 1:
+        return parts
+
+    merged = [parts[0]]
+    for part in parts[1:]:
+        if len(part) < MIN_PART_CHARS or len(merged[-1]) < MIN_PART_CHARS:
+            merged[-1] = f"{merged[-1]}\n{part}"
+        else:
+            merged.append(part)
+
+    while len(merged) > MAX_PARTS:
+        # Merge the last two parts first — the tail is where over-splitting
+        # (e.g. a model that got marker-happy) tends to accumulate.
+        tail = merged.pop()
+        merged[-1] = f"{merged[-1]}\n{tail}"
+
+    return merged
 
 
 def _split_by_length(text: str, max_chars: int) -> list[str]:

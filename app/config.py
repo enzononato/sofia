@@ -52,8 +52,8 @@ class Settings(BaseSettings):
     # replying once. A new inbound resets the timer (debounce). Media flushes
     # the batch immediately.
     MESSAGE_BATCHING_ENABLED: bool = True
-    BATCH_WINDOW_MIN_SECONDS: float = 8.0      # lower bound of the debounce window
-    BATCH_WINDOW_MAX_SECONDS: float = 10.0     # upper bound (random within [min, max])
+    BATCH_WINDOW_MIN_SECONDS: float = 15.0      # lower bound of the debounce window
+    BATCH_WINDOW_MAX_SECONDS: float = 20.0     # upper bound (random within [min, max])
 
     # Partitioned replies: the model splits long answers with a delimiter; we
     # send each part as its own WhatsApp message.
