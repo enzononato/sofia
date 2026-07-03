@@ -5,15 +5,24 @@ import { useForm } from "react-hook-form";
 import { zodResolver } from "@hookform/resolvers/zod";
 import * as z from "zod";
 import { Service, useServices, useCreateService, useUpdateService } from "@/hooks/useCalendar";
-import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Textarea } from "@/components/ui/textarea";
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { Switch } from "@/components/ui/switch";
-import { Card, CardContent, CardDescription, CardFooter, CardHeader, CardTitle } from "@/components/ui/card";
-import { Badge } from "@/components/ui/badge";
-import { Clock, DollarSign, Plus, Settings2, Loader2, Search, FileText } from "lucide-react";
+import {
+  Clock,
+  DollarSign,
+  Plus,
+  PlusCircle,
+  Settings2,
+  Loader2,
+  Search,
+  Pencil,
+  Stethoscope,
+  Timer,
+  Receipt,
+} from "lucide-react";
 import { cn } from "@/lib/utils";
 
 const formSchema = z.object({
@@ -24,6 +33,9 @@ const formSchema = z.object({
 });
 
 type FormValues = z.infer<typeof formSchema>;
+
+const money = (v: number) =>
+  v.toLocaleString("pt-BR", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 
 export default function ServicesPage() {
   const { data: services, isLoading, isError } = useServices();
@@ -97,128 +109,207 @@ export default function ServicesPage() {
     }
   };
 
-  const filteredServices = services?.filter(s => 
-    s.name.toLowerCase().includes(search.toLowerCase()) || 
+  const filteredServices = services?.filter(s =>
+    s.name.toLowerCase().includes(search.toLowerCase()) ||
     (s.description && s.description.toLowerCase().includes(search.toLowerCase()))
   ) || [];
 
+  // ── Real, derived KPIs (no fabricated analytics) ──────────────────────────
+  const activeCount = services?.filter(s => s.is_active).length ?? 0;
+  const avgDuration = services && services.length
+    ? Math.round(services.reduce((sum, s) => sum + s.duration_minutes, 0) / services.length)
+    : 0;
+  const pricedServices = (services ?? []).filter(s => s.price != null).map(s => Number(s.price));
+  const avgPrice = pricedServices.length
+    ? pricedServices.reduce((a, b) => a + b, 0) / pricedServices.length
+    : null;
+
   return (
-    <div className="flex flex-col h-full max-w-6xl mx-auto p-4 md:p-8 bg-background/5">
-      {/* Page Header */}
-      <div className="flex flex-col md:flex-row md:items-center justify-between gap-4 mb-8">
+    <div className="flex flex-col h-full max-w-6xl mx-auto p-4 md:p-8">
+      {/* ── Page Header ── */}
+      <div className="flex flex-col md:flex-row md:items-center justify-between gap-6 mb-8">
         <div>
-          <h1 className="font-heading text-2xl font-bold tracking-tight text-foreground">Serviços e Procedimentos</h1>
-          <p className="text-muted-foreground mt-1 text-sm font-sans">
-            Gerencie os serviços oferecidos. A Sofia usará isso para sugerir e agendar os pacientes.
+          <h1 className="font-heading text-2xl md:text-3xl font-bold tracking-tight text-foreground">
+            Gestão de Serviços
+          </h1>
+          <p className="text-muted-foreground mt-2 text-sm font-sans max-w-2xl">
+            Configure seu catálogo de procedimentos, defina preços e tempos de execução para otimizar sua agenda.
           </p>
         </div>
-        <Button onClick={openNewModal} className="shrink-0 bg-primary text-primary-foreground hover:brightness-110 font-semibold cursor-pointer text-xs h-9 shadow-md shadow-primary/20 rounded-full px-4">
-          <Plus className="mr-1.5 h-4 w-4" /> Novo Serviço
-        </Button>
+        <button
+          onClick={openNewModal}
+          className="sofia-btn-gradient shrink-0 flex items-center gap-2 rounded-2xl px-6 py-4 font-heading text-base font-bold text-white shadow-xl shadow-primary/20 cursor-pointer"
+        >
+          <PlusCircle className="h-5 w-5" />
+          Novo Serviço
+        </button>
       </div>
 
-      {/* Search Filter */}
-      <div className="flex items-center space-x-2 mb-6">
-        <div className="relative flex-1 max-w-sm">
-          <Search className="absolute left-3.5 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground" />
-          <Input
-            placeholder="Buscar serviços..."
-            className="pl-10 h-10 bg-background/55 border-white/10 focus-visible:border-primary/50 focus-visible:ring-0 rounded-xl placeholder:text-muted-foreground/60 text-sm"
-            value={search}
-            onChange={(e) => setSearch(e.target.value)}
-          />
+      {/* ── Stat cards (real, derived data) ── */}
+      <div className="grid grid-cols-1 md:grid-cols-3 gap-4 mb-8">
+        <div className="glass-card flex items-center gap-5 rounded-3xl p-6">
+          <div className="flex h-12 w-12 items-center justify-center rounded-2xl bg-primary/10 text-primary">
+            <Stethoscope className="h-6 w-6" />
+          </div>
+          <div>
+            <p className="font-mono text-[10px] uppercase tracking-widest text-muted-foreground">Total de Serviços</p>
+            <p className="font-heading text-xl font-bold text-foreground">{activeCount} Ativos</p>
+          </div>
+        </div>
+
+        <div className="glass-card flex items-center gap-5 rounded-3xl p-6">
+          <div className="flex h-12 w-12 items-center justify-center rounded-2xl bg-[#4cd7f6]/10 text-[#4cd7f6]">
+            <Timer className="h-6 w-6" />
+          </div>
+          <div>
+            <p className="font-mono text-[10px] uppercase tracking-widest text-muted-foreground">Tempo Médio</p>
+            <p className="font-heading text-xl font-bold text-foreground">{avgDuration} min</p>
+          </div>
+        </div>
+
+        <div className="glass-card flex items-center gap-5 rounded-3xl p-6">
+          <div className="flex h-12 w-12 items-center justify-center rounded-2xl bg-secondary/10 text-secondary">
+            <Receipt className="h-6 w-6" />
+          </div>
+          <div>
+            <p className="font-mono text-[10px] uppercase tracking-widest text-muted-foreground">Ticket Médio</p>
+            <p className="font-heading text-xl font-bold text-foreground">
+              {avgPrice != null ? `R$ ${money(avgPrice)}` : "—"}
+            </p>
+          </div>
         </div>
       </div>
 
+      {/* ── Search ── */}
+      <div className="relative mb-6 max-w-sm">
+        <Search className="absolute left-3.5 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground" />
+        <Input
+          placeholder="Buscar serviços..."
+          className="pl-10 h-10 bg-background/55 dark:bg-background/55 border-white/10 focus-visible:border-primary/50 focus-visible:ring-0 rounded-full placeholder:text-muted-foreground/60 text-sm"
+          value={search}
+          onChange={(e) => setSearch(e.target.value)}
+        />
+      </div>
+
+      {/* ── Service table ── */}
       {isLoading ? (
-        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
-          {[1, 2, 3].map((i) => (
-            <Card key={i} className="animate-pulse border-white/5 bg-white/5">
-              <CardHeader className="h-24 bg-white/5 rounded-t-xl" />
-              <CardContent className="py-4 space-y-3">
-                <div className="h-4 w-1/2 bg-white/5 rounded" />
+        <div className="glass-card rounded-[32px] p-6 space-y-4 animate-pulse">
+          {[1, 2, 3, 4].map((i) => (
+            <div key={i} className="flex items-center gap-4">
+              <div className="h-12 w-12 rounded-xl bg-white/5" />
+              <div className="flex-1 space-y-2">
                 <div className="h-4 w-1/3 bg-white/5 rounded" />
-              </CardContent>
-            </Card>
+                <div className="h-3 w-1/2 bg-white/5 rounded" />
+              </div>
+            </div>
           ))}
         </div>
       ) : isError ? (
-        <Card className="border-destructive/20 bg-destructive/5 text-destructive rounded-2xl">
-          <CardHeader>
-            <CardTitle className="font-heading text-lg font-bold text-destructive">Erro ao carregar serviços</CardTitle>
-            <CardDescription className="text-destructive/80 font-sans text-xs">Verifique sua conexão ou tente recarregar a página.</CardDescription>
-          </CardHeader>
-        </Card>
+        <div className="glass-card rounded-2xl border-destructive/20 bg-destructive/5 p-6">
+          <h3 className="font-heading text-lg font-bold text-destructive">Erro ao carregar serviços</h3>
+          <p className="text-destructive/80 font-sans text-xs mt-1">Verifique sua conexão ou tente recarregar a página.</p>
+        </div>
       ) : filteredServices.length === 0 ? (
-        <div className="flex flex-col items-center justify-center p-12 text-center border border-dashed border-white/10 rounded-2xl bg-white/5 backdrop-blur-sm">
-          <Settings2 className="h-12 w-12 text-muted-foreground/40 mb-4 animate-spin duration-3000" />
+        <div className="flex flex-col items-center justify-center p-12 text-center glass-card rounded-[32px]">
+          <Settings2 className="h-12 w-12 text-muted-foreground/40 mb-4" />
           <h3 className="font-heading text-lg font-semibold text-foreground">Nenhum serviço encontrado</h3>
           <p className="text-sm text-muted-foreground mt-1 mb-4 font-sans">
             {search ? "Tente usar outros termos na busca." : "Você ainda não cadastrou nenhum serviço."}
           </p>
           {!search && (
-            <Button onClick={openNewModal} variant="outline" className="border-white/10 hover:bg-white/5 text-xs font-semibold cursor-pointer">
+            <button onClick={openNewModal} className="sofia-btn-gradient rounded-xl px-5 py-2.5 text-xs font-bold text-white cursor-pointer">
               Cadastrar Primeiro Serviço
-            </Button>
+            </button>
           )}
         </div>
       ) : (
-        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
-          {filteredServices.map((service) => (
-            <Card 
-              key={service.id} 
-              className={cn(
-                "flex flex-col transition-all hover:shadow-xl hover:border-primary/30 border border-white/10 bg-background/45 backdrop-blur-md rounded-2xl cursor-pointer relative overflow-hidden",
-                !service.is_active && "opacity-60 grayscale-[0.2]"
-              )}
-              onClick={() => openEditModal(service)}
-            >
-              <CardHeader className="pb-3">
-                <div className="flex justify-between items-start gap-2">
-                  <CardTitle className="font-heading text-base font-bold text-foreground line-clamp-2 leading-tight">
-                    {service.name}
-                  </CardTitle>
-                  <div className="shrink-0 cursor-pointer" onClick={e => e.stopPropagation()}>
-                    <Switch
-                      checked={service.is_active}
-                      onCheckedChange={(checked) => handleToggleActive(service, checked)}
-                      className="cursor-pointer"
-                    />
-                  </div>
-                </div>
-                {!service.is_active && (
-                  <Badge variant="secondary" className="w-fit text-[9px] font-mono uppercase tracking-wider mt-1 bg-destructive/10 text-destructive border border-destructive/20 rounded-md">
-                    Inativo
-                  </Badge>
-                )}
-              </CardHeader>
-              
-              <CardContent className="flex-1 pb-4 flex flex-col justify-between">
-                {service.description ? (
-                  <p className="text-xs text-muted-foreground line-clamp-2 mb-4 font-sans leading-relaxed">
-                    {service.description}
-                  </p>
-                ) : (
-                  <p className="text-xs text-muted-foreground/40 italic mb-4 font-sans">
-                    Sem descrição
-                  </p>
-                )}
-                
-                <div className="flex items-center gap-4 text-xs font-semibold mt-auto pt-2 border-t border-white/5">
-                  <div className="flex items-center gap-1.5 text-foreground/80">
-                    <Clock className="h-4 w-4 text-muted-foreground/60" />
-                    {service.duration_minutes} min
-                  </div>
-                  {service.price != null && (
-                    <div className="flex items-center gap-1.5 text-emerald-400 font-mono">
-                      <DollarSign className="h-3.5 w-3.5 text-emerald-500" />
-                      {Number(service.price).toLocaleString("pt-BR", { minimumFractionDigits: 2 })}
-                    </div>
-                  )}
-                </div>
-              </CardContent>
-            </Card>
-          ))}
+        <div className="glass-card rounded-[32px] overflow-hidden">
+          <div className="overflow-x-auto">
+            <table className="w-full border-collapse min-w-[640px]">
+              <thead>
+                <tr className="border-b border-white/10 bg-white/[0.02]">
+                  <th className="px-6 py-5 text-left font-mono text-[10px] uppercase tracking-widest text-muted-foreground">Serviço</th>
+                  <th className="px-4 py-5 text-left font-mono text-[10px] uppercase tracking-widest text-muted-foreground">Duração</th>
+                  <th className="px-4 py-5 text-left font-mono text-[10px] uppercase tracking-widest text-muted-foreground">Preço</th>
+                  <th className="px-4 py-5 text-left font-mono text-[10px] uppercase tracking-widest text-muted-foreground">Status</th>
+                  <th className="px-6 py-5 text-right font-mono text-[10px] uppercase tracking-widest text-muted-foreground">Ações</th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-white/[0.06]">
+                {filteredServices.map((service) => (
+                  <tr
+                    key={service.id}
+                    onClick={() => openEditModal(service)}
+                    className={cn(
+                      "group cursor-pointer transition-colors hover:bg-white/[0.03]",
+                      !service.is_active && "opacity-50"
+                    )}
+                  >
+                    {/* Service (avatar with initial — no image field exists on the model) */}
+                    <td className="px-6 py-5">
+                      <div className="flex items-center gap-4">
+                        <div className="flex h-12 w-12 shrink-0 items-center justify-center rounded-xl bg-gradient-to-br from-primary/25 to-secondary/25 border border-white/10 font-heading text-lg font-bold text-primary">
+                          {service.name.trim().charAt(0).toUpperCase() || "S"}
+                        </div>
+                        <div className="min-w-0">
+                          <p className="font-heading text-sm font-semibold text-foreground truncate">{service.name}</p>
+                          {service.description ? (
+                            <p className="text-xs text-muted-foreground line-clamp-1 font-sans mt-0.5 max-w-[280px]">
+                              {service.description}
+                            </p>
+                          ) : (
+                            <p className="text-xs text-muted-foreground/40 italic font-sans mt-0.5">Sem descrição</p>
+                          )}
+                        </div>
+                      </div>
+                    </td>
+
+                    {/* Duration */}
+                    <td className="px-4 py-5">
+                      <div className="flex items-center gap-2 text-foreground">
+                        <Clock className="h-4 w-4 text-primary/80" />
+                        <span className="text-sm font-sans whitespace-nowrap">{service.duration_minutes} min</span>
+                      </div>
+                    </td>
+
+                    {/* Price */}
+                    <td className="px-4 py-5">
+                      {service.price != null ? (
+                        <div className="flex items-center gap-2 text-foreground">
+                          <DollarSign className="h-4 w-4 text-secondary/80" />
+                          <span className="text-sm font-sans whitespace-nowrap">R$ {money(Number(service.price))}</span>
+                        </div>
+                      ) : (
+                        <span className="text-sm text-muted-foreground/40">—</span>
+                      )}
+                    </td>
+
+                    {/* Status toggle */}
+                    <td className="px-4 py-5">
+                      <div className="cursor-pointer w-fit" onClick={(e) => e.stopPropagation()}>
+                        <Switch
+                          checked={service.is_active}
+                          onCheckedChange={(checked) => handleToggleActive(service, checked)}
+                          className="cursor-pointer"
+                        />
+                      </div>
+                    </td>
+
+                    {/* Actions */}
+                    <td className="px-6 py-5 text-right">
+                      <button
+                        onClick={(e) => { e.stopPropagation(); openEditModal(service); }}
+                        className="inline-flex h-8 w-8 items-center justify-center rounded-lg text-primary transition-colors hover:bg-primary/10 hover:text-[#c4b5fd] cursor-pointer"
+                        aria-label={`Editar ${service.name}`}
+                      >
+                        <Pencil className="h-4 w-4" />
+                      </button>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
         </div>
       )}
 
@@ -242,9 +333,9 @@ export default function ServicesPage() {
 
             <div className="space-y-1.5">
               <Label htmlFor="description" className="font-mono text-[10px] uppercase tracking-wider text-muted-foreground/80 block">Descrição</Label>
-              <Textarea 
-                id="description" 
-                {...register("description")} 
+              <Textarea
+                id="description"
+                {...register("description")}
                 placeholder="Ex: Remoção de tártaro e polimento..."
                 className="rounded-xl border border-white/10 bg-background/55 text-foreground p-3 text-sm focus:outline-none focus:ring-1 focus:ring-primary/50 h-20 resize-none w-full"
               />

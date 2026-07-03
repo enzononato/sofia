@@ -118,39 +118,46 @@ export function CalendarLayout() {
           </div>
         </div>
 
-        {/* Stats Cards */}
-        <div className="px-5 pb-5 space-y-3">
-          <h3 className="font-mono text-[10px] font-semibold text-muted-foreground/60 uppercase tracking-widest mb-2">
-            Resumo do dia
-          </h3>
+        {/* Day Summary — three stacked rows (matches Stitch mockup) */}
+        <div className="px-5 pb-5">
+          <div className="mb-4">
+            <p className="font-mono text-[10px] font-semibold text-muted-foreground/60 uppercase tracking-widest">
+              Resumo do dia
+            </p>
+            <h3 className="font-heading text-base font-semibold capitalize text-foreground mt-0.5">
+              {isToday(date) ? "Hoje, " : ""}{format(date, "d 'de' MMMM", { locale: ptBR })}
+            </h3>
+          </div>
 
-          <div className="grid grid-cols-1 gap-3">
-            <div className="flex items-center gap-4 rounded-xl border border-white/10 bg-white/5 p-4 shadow-md">
-              <div className="flex items-center justify-center h-10 w-10 rounded-lg bg-primary/10 text-primary">
-                <CalendarDays className="h-5 w-5" />
-              </div>
-              <div>
-                <p className="font-heading text-2xl font-bold leading-none text-foreground">{totalAppts}</p>
-                <p className="text-[11px] text-muted-foreground mt-1">Agendamentos</p>
-              </div>
+          <div className="space-y-3">
+            <div className="flex items-center justify-between rounded-xl border border-white/10 bg-white/5 p-4 shadow-md">
+              <span className="flex items-center gap-2.5 text-sm text-muted-foreground">
+                <CalendarDays className="h-4 w-4 text-muted-foreground/70" />
+                Agendamentos
+              </span>
+              <span className="rounded-md bg-primary/20 px-2.5 py-0.5 font-mono text-sm font-semibold text-primary">
+                {String(totalAppts).padStart(2, "0")}
+              </span>
             </div>
 
-            <div className="grid grid-cols-2 gap-3">
-              <div className="flex flex-col items-center rounded-xl border border-white/10 bg-white/5 p-3 shadow-md">
-                <div className="flex items-center justify-center h-8 w-8 rounded-lg bg-emerald-500/10 text-emerald-400 mb-1.5">
-                  <CheckCircle2 className="h-4 w-4" />
-                </div>
-                <p className="font-heading text-lg font-bold leading-none text-foreground">{confirmed}</p>
-                <p className="text-[10px] text-muted-foreground mt-1">Ativos</p>
-              </div>
+            <div className="flex items-center justify-between rounded-xl border border-white/10 bg-white/5 p-4 shadow-md">
+              <span className="flex items-center gap-2.5 text-sm text-muted-foreground">
+                <CheckCircle2 className="h-4 w-4 text-emerald-400/80" />
+                Confirmados
+              </span>
+              <span className="rounded-md bg-emerald-500/20 px-2.5 py-0.5 font-mono text-sm font-semibold text-emerald-400">
+                {String(confirmed).padStart(2, "0")}
+              </span>
+            </div>
 
-              <div className="flex flex-col items-center rounded-xl border border-white/10 bg-white/5 p-3 shadow-md">
-                <div className="flex items-center justify-center h-8 w-8 rounded-lg bg-destructive/10 text-destructive mb-1.5">
-                  <XCircle className="h-4 w-4" />
-                </div>
-                <p className="font-heading text-lg font-bold leading-none text-foreground">{cancelled}</p>
-                <p className="text-[10px] text-muted-foreground mt-1">Cancelados</p>
-              </div>
+            <div className="flex items-center justify-between rounded-xl border border-white/10 bg-white/5 p-4 shadow-md">
+              <span className="flex items-center gap-2.5 text-sm text-muted-foreground">
+                <XCircle className="h-4 w-4 text-destructive/80" />
+                Cancelados
+              </span>
+              <span className="rounded-md bg-destructive/20 px-2.5 py-0.5 font-mono text-sm font-semibold text-destructive">
+                {String(cancelled).padStart(2, "0")}
+              </span>
             </div>
           </div>
         </div>

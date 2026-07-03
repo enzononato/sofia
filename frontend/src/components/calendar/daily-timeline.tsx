@@ -109,14 +109,17 @@ export function DailyTimeline({ date, appointments, contacts, services, isLoadin
             </div>
           ))}
 
-          {/* "Now" line */}
+          {/* "Now" line — violet with a time pill (matches Stitch mockup) */}
           {nowIndicator !== null && (
             <div
               className="absolute left-16 lg:left-20 right-0 z-20 pointer-events-none flex items-center"
               style={{ top: `${nowIndicator}px` }}
             >
-              <div className="w-2.5 h-2.5 rounded-full bg-red-500 -ml-[5px] shadow-md shadow-red-500/50"></div>
-              <div className="flex-1 border-t-2 border-red-500/70"></div>
+              <div className="-ml-1 rounded bg-primary px-1.5 py-0.5 font-mono text-[10px] font-bold text-primary-foreground shadow-md shadow-primary/40">
+                {format(new Date(), "HH:mm")}
+              </div>
+              <div className="flex-1 border-t-2 border-primary/60 shadow-[0_0_8px_rgba(208,188,255,0.6)]"></div>
+              <div className="h-2 w-2 rounded-full bg-primary"></div>
             </div>
           )}
 
@@ -133,20 +136,23 @@ export function DailyTimeline({ date, appointments, contacts, services, isLoadin
             {enrichedAppointments.map((appt) => {
               const isCancelled = appt.status === "cancelled";
 
+              // Status → colour mapping mirrors the Stitch mockup: violet for
+              // "Agendado", emerald for "Confirmado", cyan for "Compareceu",
+              // rose for "Cancelado", amber for "Não compareceu".
               let accentColor = "border-l-primary";
               let bgColor = "bg-primary/10 hover:bg-primary/15";
               let badgeColor = "bg-primary/20 text-primary";
               let statusLabel = "Agendado";
 
               if (appt.status === "confirmed") {
-                accentColor = "border-l-primary";
-                bgColor = "bg-primary/10 hover:bg-primary/15";
-                badgeColor = "bg-primary/20 text-primary";
-                statusLabel = "Confirmado";
-              } else if (appt.status === "completed") {
                 accentColor = "border-l-emerald-500";
                 bgColor = "bg-emerald-500/10 hover:bg-emerald-500/15";
                 badgeColor = "bg-emerald-500/20 text-emerald-400";
+                statusLabel = "Confirmado";
+              } else if (appt.status === "completed") {
+                accentColor = "border-l-[#4cd7f6]";
+                bgColor = "bg-[#4cd7f6]/10 hover:bg-[#4cd7f6]/15";
+                badgeColor = "bg-[#4cd7f6]/20 text-[#4cd7f6]";
                 statusLabel = "Compareceu";
               } else if (isCancelled) {
                 accentColor = "border-l-destructive";
