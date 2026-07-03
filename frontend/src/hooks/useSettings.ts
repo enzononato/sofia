@@ -40,6 +40,9 @@ export interface TenantAIConfig {
   temperature?: number;
   max_output_tokens?: number;
   multimodal_enabled?: boolean;
+  // "capacity": clinic-wide slots (N simultaneous). "per_professional": each
+  // booking is assigned to a professional, respecting their services + hours.
+  scheduling_mode?: "capacity" | "per_professional";
   prompt_first_contact?: string;
   prompt_imminent_appointment?: string;
   prompt_post_appointment?: string;

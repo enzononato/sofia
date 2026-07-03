@@ -11,7 +11,8 @@ import { Label } from "@/components/ui/label";
 import { Textarea } from "@/components/ui/textarea";
 import { Switch } from "@/components/ui/switch";
 import { Accordion, AccordionItem, AccordionTrigger, AccordionContent } from "@/components/ui/accordion";
-import { Bot, MessageSquare, SlidersHorizontal, Save, Loader2, Sparkles } from "lucide-react";
+import { Bot, MessageSquare, SlidersHorizontal, Save, Loader2, Sparkles, Users, Layers, AlertTriangle, CalendarClock } from "lucide-react";
+import { cn } from "@/lib/utils";
 
 const formSchema = z.object({
   model: z.string().min(1, "Obrigatório"),
@@ -32,6 +33,33 @@ type FormValues = z.infer<typeof formSchema>;
 export function AiTab({ tenant }: { tenant: TenantProfile }) {
   const { mutateAsync: updateTenant, isPending } = useUpdateTenant();
   const [isSuccess, setIsSuccess] = useState(false);
+
+  // ── Scheduling mode (capacity × per-professional) ──────────────────────────
+  // Self-contained: saves on select via the deep-merge PATCH, independent of the
+  // main AI form below, so it never clobbers the other ai_config keys.
+  const [schedulingMode, setSchedulingMode] = useState<"capacity" | "per_professional">(
+    tenant.ai_config?.scheduling_mode === "per_professional" ? "per_professional" : "capacity"
+  );
+  const [modeSaving, setModeSaving] = useState(false);
+  const [modeSaved, setModeSaved] = useState(false);
+
+  const handleSelectMode = async (mode: "capacity" | "per_professional") => {
+    if (mode === schedulingMode || modeSaving) return;
+    const previous = schedulingMode;
+    setSchedulingMode(mode);
+    setModeSaving(true);
+    setModeSaved(false);
+    try {
+      await updateTenant({ ai_config: { scheduling_mode: mode } });
+      setModeSaved(true);
+      setTimeout(() => setModeSaved(false), 3000);
+    } catch (error) {
+      console.error("Failed to update scheduling mode", error);
+      setSchedulingMode(previous); // revert optimistic change on failure
+    } finally {
+      setModeSaving(false);
+    }
+  };
 
   const defaultValues = tenant.ai_config || {
     model: "gemini-2.0-flash",
@@ -92,6 +120,83 @@ export function AiTab({ tenant }: { tenant: TenantProfile }) {
         <p className="text-xs text-muted-foreground/80 font-sans mt-0.5">
           Configure a personalidade, o tom de voz e as regras de negócio da sua secretária virtual.
         </p>
+      </div>
+
+      {/* ── Scheduling mode ── */}
+      <div className="rounded-2xl border border-white/10 bg-white/5 p-5 shadow-md space-y-4">
+        <div>
+          <Label className="font-heading text-sm font-semibold text-foreground flex items-center gap-2">
+            <CalendarClock className="h-4 w-4 text-primary" />
+            Modo de agendamento
+          </Label>
+          <p className="text-xs text-muted-foreground/80 font-sans mt-0.5 leading-relaxed">
+            Define como a Sofia verifica disponibilidade e agenda os pacientes.
+          </p>
+        </div>
+
+        <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+          <button
+            type="button"
+            onClick={() => handleSelectMode("capacity")}
+            disabled={modeSaving}
+            className={cn(
+              "text-left rounded-xl border p-4 transition-all cursor-pointer disabled:cursor-not-allowed",
+              schedulingMode === "capacity"
+                ? "border-primary/50 bg-primary/10 ring-1 ring-primary/30"
+                : "border-white/10 bg-background/40 hover:bg-white/5"
+            )}
+          >
+            <div className="flex items-center gap-2 mb-1">
+              <Layers className={cn("h-4 w-4", schedulingMode === "capacity" ? "text-primary" : "text-muted-foreground/70")} />
+              <span className="font-heading text-sm font-semibold text-foreground">Por capacidade</span>
+            </div>
+            <p className="text-xs text-muted-foreground/80 font-sans leading-relaxed">
+              A clínica atende N pacientes ao mesmo tempo. A Sofia não atribui um profissional específico ao agendar.
+            </p>
+          </button>
+
+          <button
+            type="button"
+            onClick={() => handleSelectMode("per_professional")}
+            disabled={modeSaving}
+            className={cn(
+              "text-left rounded-xl border p-4 transition-all cursor-pointer disabled:cursor-not-allowed",
+              schedulingMode === "per_professional"
+                ? "border-primary/50 bg-primary/10 ring-1 ring-primary/30"
+                : "border-white/10 bg-background/40 hover:bg-white/5"
+            )}
+          >
+            <div className="flex items-center gap-2 mb-1">
+              <Users className={cn("h-4 w-4", schedulingMode === "per_professional" ? "text-primary" : "text-muted-foreground/70")} />
+              <span className="font-heading text-sm font-semibold text-foreground">Por profissional</span>
+            </div>
+            <p className="text-xs text-muted-foreground/80 font-sans leading-relaxed">
+              Cada agendamento é atribuído a um profissional, respeitando os serviços e horários de trabalho de cada um. Necessário para a sincronização da agenda de cada profissional com o Google Calendar.
+            </p>
+          </button>
+        </div>
+
+        {schedulingMode === "per_professional" && (
+          <div className="flex items-start gap-2.5 rounded-xl border border-amber-500/30 bg-amber-500/10 p-3">
+            <AlertTriangle className="h-4 w-4 text-amber-400 shrink-0 mt-0.5" />
+            <p className="text-xs text-amber-200/90 font-sans leading-relaxed">
+              Neste modo, um serviço só fica disponível para agendamento se tiver{" "}
+              <strong className="font-semibold">pelo menos um profissional vinculado</strong> a ele. Vá em{" "}
+              <strong className="font-semibold">Equipe → configurar profissional</strong> para definir os serviços e os horários de trabalho de cada um.
+            </p>
+          </div>
+        )}
+
+        <div className="h-4">
+          {modeSaving && (
+            <span className="text-xs text-muted-foreground flex items-center gap-1.5">
+              <Loader2 className="h-3 w-3 animate-spin" /> Salvando...
+            </span>
+          )}
+          {modeSaved && (
+            <span className="text-xs text-emerald-400 font-sans font-semibold">Modo de agendamento salvo!</span>
+          )}
+        </div>
       </div>
 
       <div className="grid gap-6">
