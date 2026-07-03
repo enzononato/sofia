@@ -34,21 +34,16 @@ export interface TenantSettings {
   ignore_groups?: boolean;
 }
 
+// Sofia's personality/behavior (base prompt + per-stage overlays) is fixed in
+// code — not tenant-configurable. Only technical AI parameters live here.
 export interface TenantAIConfig {
   model?: string;
-  system_prompt?: string;
   temperature?: number;
   max_output_tokens?: number;
   multimodal_enabled?: boolean;
   // "capacity": clinic-wide slots (N simultaneous). "per_professional": each
   // booking is assigned to a professional, respecting their services + hours.
   scheduling_mode?: "capacity" | "per_professional";
-  prompt_first_contact?: string;
-  prompt_imminent_appointment?: string;
-  prompt_post_appointment?: string;
-  prompt_active_patient?: string;
-  prompt_returning_lead?: string;
-  prompt_reactivation?: string;
 }
 
 export interface TenantProfile {

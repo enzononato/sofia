@@ -5,24 +5,28 @@ A IA atua como secretária executiva autônoma: usa as ferramentas disponíveis
 por iniciativa própria para resolver a solicitação do paciente sem esperar
 ser guiada passo a passo.
 
-Prompt final = BASE (`system_prompt`) + STAGE_OVERLAY + CONTEXT_BLOCK
-onde STAGE_OVERLAY varia conforme o estágio da conversa (ver `ai_stages.py`)
-e CONTEXT_BLOCK injeta dados do contato (nome, próximo agendamento, etc.).
+Prompt final = DEFAULT_SYSTEM_PROMPT (BASE) + STAGE_OVERLAY + CONTEXT_BLOCK
+onde STAGE_OVERLAY varia conforme o estágio da conversa (ver `ai_stages.py`,
+DEFAULT_STAGE_OVERLAYS) e CONTEXT_BLOCK injeta dados do contato (nome, próximo
+agendamento, etc.) e da clínica (endereço, horário, formas de pagamento — ver
+tenant.settings).
+
+**Sofia's personality/behavior is fixed in code, not tenant-configurable.**
+The base prompt and per-stage overlays are hardcoded on purpose — clinics
+provide clinic INFO (tenant.settings: address, phone, schedule, payment
+methods...), never instructions that change how Sofia behaves. Any
+"system_prompt" / "prompt_<stage>" keys that might exist in a tenant's
+ai_config (e.g. from data saved before this was locked down) are intentionally
+never read here.
 
 tenant.ai_config shape:
 {
-    "model": "gemini-2.0-flash",
-    "system_prompt": "...",                     # sobrescreve DEFAULT_SYSTEM_PROMPT (BASE)
+    "model": "gemini-2.5-flash",
     "temperature": 0.7,
     "max_output_tokens": 1024,
     # NOTE: gemini_api_key is deprecated/ignored — the server's global key is always used.
-    "multimodal_enabled": false,                # liga áudio/imagem/vídeo/documento
-    "prompt_first_contact": "...",              # overlays opcionais por estágio
-    "prompt_imminent_appointment": "...",
-    "prompt_post_appointment": "...",
-    "prompt_active_patient": "...",
-    "prompt_returning_lead": "...",
-    "prompt_reactivation": "..."
+    "multimodal_enabled": true,                 # liga áudio/imagem/vídeo/documento (default: on)
+    "scheduling_mode": "per_professional"       # "capacity" | "per_professional" (default: per_professional)
 }
 """
 
@@ -184,7 +188,9 @@ async def generate_reply(
         (reply_text, model_name)
     """
     ai_cfg = tenant.ai_config or {}
-    base_prompt = ai_cfg.get("system_prompt") or DEFAULT_SYSTEM_PROMPT
+    # Sofia's base prompt is fixed in code — never tenant-configurable (see
+    # module docstring). Any "system_prompt" key in ai_config is ignored.
+    base_prompt = DEFAULT_SYSTEM_PROMPT
     model = ai_cfg.get("model") or settings.DEFAULT_AI_MODEL
     temperature = float(ai_cfg.get("temperature", 0.7))
     max_output_tokens = int(ai_cfg.get("max_output_tokens", 1024))
@@ -195,7 +201,7 @@ async def generate_reply(
 
     # Stage detection + per-stage overlay + structured contact context
     stage, appts = await ai_stages.analyze(db, contact, history)
-    overlay = ai_stages.overlay_for(stage, ai_cfg)
+    overlay = ai_stages.overlay_for(stage)
     context_block = ai_stages.build_context_block(contact, stage, appts, tenant.settings or {})
     clinic_identity = f"Você é a secretária virtual da clínica \"{tenant.name}\"."
     system_prompt = f"{base_prompt}\n\n{clinic_identity}\n\n{overlay}\n\n{context_block}"

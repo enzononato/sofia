@@ -132,10 +132,10 @@ async def analyze(
     return Stage.RETURNING_LEAD, appts
 
 
-def overlay_for(stage: Stage, ai_cfg: dict | None) -> str:
-    """Return the per-stage overlay; tenant override beats the default."""
-    custom = (ai_cfg or {}).get(f"prompt_{stage.value}")
-    return custom or DEFAULT_STAGE_OVERLAYS[stage]
+def overlay_for(stage: Stage) -> str:
+    """Return the per-stage overlay. Fixed in code — not tenant-configurable
+    (see app.services.ai module docstring)."""
+    return DEFAULT_STAGE_OVERLAYS[stage]
 
 
 def build_context_block(
