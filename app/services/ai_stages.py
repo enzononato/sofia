@@ -155,12 +155,26 @@ def build_context_block(
     """
     now = datetime.now(timezone.utc)
     tz = _clinic_tz(tenant_settings or {})
+    local_now = now.astimezone(tz)
+    tomorrow = local_now + timedelta(days=1)
+    day_after = local_now + timedelta(days=2)
+    next_week = local_now + timedelta(days=7)
+
+    days_of_week = ['Segunda-feira', 'Terça-feira', 'Quarta-feira', 'Quinta-feira', 'Sexta-feira', 'Sábado', 'Domingo']
+    today_name = days_of_week[local_now.weekday()]
+    tomorrow_name = days_of_week[tomorrow.weekday()]
+    day_after_name = days_of_week[day_after.weekday()]
+    next_week_name = days_of_week[next_week.weekday()]
 
     lines: list[str] = ["--- CONTEXTO ATUAL ---"]
-    lines.append(f"Data e hora agora: {_fmt_local(now, tz)} (fuso {tz.key})")
+    lines.append(f"Hoje é {today_name}, dia {local_now.strftime('%d/%m/%Y')} (hora local agora: {local_now.strftime('%H:%M')} - fuso {tz.key})")
+    lines.append(f"Amanhã é {tomorrow_name}, dia {tomorrow.strftime('%d/%m/%Y')}")
+    lines.append(f"Depois de amanhã é {day_after_name}, dia {day_after.strftime('%d/%m/%Y')}")
+    lines.append(f"Mesmo dia na próxima semana é {next_week_name}, dia {next_week.strftime('%d/%m/%Y')}")
     lines.append(
-        "Sempre interprete datas relativas (hoje, amanhã, próxima segunda) "
-        "e informe horários neste fuso."
+        "Sempre use as datas reais acima como referência absoluta para datas relativas "
+        "(hoje, amanhã, próxima segunda, etc.). Nunca invente ou suponha datas. "
+        "Não ofereça datas cujo dia da semana não coincida com as referências acima."
     )
     lines.append("")
     lines.append("--- CONTEXTO DO PACIENTE ---")
