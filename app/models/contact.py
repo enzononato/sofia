@@ -24,9 +24,15 @@ class ContactStatus(str, PyEnum):
 
 class CrmStage(str, PyEnum):
     """CRM pipeline stage (Kanban column). Distinct from ContactStatus —
-    this tracks the sales/relationship funnel that Sofia and the team manage."""
+    this tracks the sales/relationship funnel that Sofia and the team manage.
+
+    A contact stays in NEW_LEAD until Sofia has enough signal to qualify it as
+    COLD_LEAD (low intent / just researching / hesitant) or HOT_LEAD (clear
+    buying intent, close to booking). SCHEDULED/ATTENDED are factual (driven by
+    appointments), POST_CARE/LOST are set by Sofia or the team."""
     NEW_LEAD = "new_lead"
-    IN_CONVERSATION = "in_conversation"
+    COLD_LEAD = "cold_lead"
+    HOT_LEAD = "hot_lead"
     SCHEDULED = "scheduled"
     ATTENDED = "attended"
     POST_CARE = "post_care"

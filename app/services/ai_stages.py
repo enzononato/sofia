@@ -195,7 +195,8 @@ def build_context_block(
     lines.append(f"Status: {contact.status}")
     lines.append(
         f"Estágio no funil (CRM): {contact.crm_stage} "
-        "(use set_crm_stage só se a conversa indicar mudança clara — ex.: sem interesse → lost)"
+        "(classifique com set_crm_stage conforme a conversa: interesse claro → hot_lead, "
+        "pouco engajado/só pesquisando → cold_lead, sem interesse → lost)"
     )
     if contact.email:
         lines.append(f"Email: {contact.email}")

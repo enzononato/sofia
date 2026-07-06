@@ -3,7 +3,8 @@ import api from "@/lib/axios";
 
 export type CrmStage =
   | "new_lead"
-  | "in_conversation"
+  | "cold_lead"
+  | "hot_lead"
   | "scheduled"
   | "attended"
   | "post_care"

@@ -167,7 +167,11 @@ async def run_reengagement() -> None:
                         Contact.tenant_id == tenant.id,
                         Contact.last_inbound_at.is_not(None),
                         Contact.last_inbound_at < silent_before,
-                        Contact.crm_stage.in_([CrmStage.NEW_LEAD.value, CrmStage.IN_CONVERSATION.value]),
+                        Contact.crm_stage.in_([
+                            CrmStage.NEW_LEAD.value,
+                            CrmStage.COLD_LEAD.value,
+                            CrmStage.HOT_LEAD.value,
+                        ]),
                         Contact.status != ContactStatus.BLOCKED,
                         Contact.ai_paused.is_(False),
                         or_(Contact.last_followup_at.is_(None), Contact.last_followup_at < cooldown_before),

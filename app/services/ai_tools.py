@@ -47,6 +47,9 @@ _list_services_decl = types.FunctionDeclaration(
         "incluindo nome, duração em minutos e preço. O preço retornado é sempre "
         "por consulta/sessão avulsa — nunca um pacote fechado ou tratamento completo. "
         "Ao informar valores ao paciente, deixe claro que o preço é por consulta. "
+        "Se o campo price vier nulo (null) para um serviço, a clínica NÃO tem valor fixo "
+        "tabelado para ele — nunca invente um número nem estime um valor; diga ao paciente "
+        "que esse valor é avaliado e informado durante a consulta presencial. "
         "Use quando o paciente perguntar o que a clínica oferece ou antes de "
         "verificar disponibilidade."
     ),
@@ -238,24 +241,29 @@ _list_professionals_decl = types.FunctionDeclaration(
 _set_crm_stage_decl = types.FunctionDeclaration(
     name="set_crm_stage",
     description=(
-        "Atualiza o estágio do paciente no funil de CRM (Kanban) com base na conversa. "
-        "Use quando perceber uma mudança clara de intenção. Estágios válidos: "
-        "'in_conversation' (conversando, ainda sem agendar), "
-        "'lost' (disse que não tem interesse / não quer mais), "
+        "Classifica/atualiza o estágio do paciente no funil de CRM (Kanban) com base na conversa. "
+        "O paciente começa em 'new_lead' (não classificado) e é você quem deve qualificá-lo assim "
+        "que a conversa der sinal suficiente. Estágios válidos: "
+        "'hot_lead' (LEAD QUENTE — demonstrou interesse claro: perguntou preço/horário, quer marcar, "
+        "está decidindo, responde com entusiasmo); "
+        "'cold_lead' (LEAD FRIO — pouco engajado: só pesquisando, evasivo, 'depois eu vejo', "
+        "sumindo nas respostas, sem intenção clara ainda); "
+        "'lost' (PERDIDO — disse claramente que não tem interesse / não quer mais); "
         "'post_care' (já foi atendido e está em acompanhamento). "
+        "Reclassifique quando a temperatura mudar (ex.: um cold_lead que volta animado vira hot_lead). "
         "NÃO use para 'scheduled'/'attended' — esses são definidos automaticamente ao agendar/concluir. "
-        "Não invente: só mude se a conversa indicar."
+        "Não invente: só classifique com base no que a conversa realmente indicar."
     ),
     parameters=types.Schema(
         type=types.Type.OBJECT,
         properties={
             "stage": types.Schema(
                 type=types.Type.STRING,
-                description="Novo estágio: in_conversation | post_care | lost",
+                description="Novo estágio: hot_lead | cold_lead | post_care | lost",
             ),
             "reason": types.Schema(
                 type=types.Type.STRING,
-                description="Motivo curto da mudança (ex: 'paciente disse que não tem interesse').",
+                description="Motivo curto da mudança (ex: 'perguntou preço e horário, quer marcar').",
             ),
         },
         required=["stage"],
@@ -1067,7 +1075,8 @@ async def _update_contact_info(
 # Stages the AI may set directly. scheduled/attended are driven by facts
 # (appointment created/completed), so the AI is not allowed to set them here.
 _AI_SETTABLE_STAGES = {
-    CrmStage.IN_CONVERSATION.value,
+    CrmStage.COLD_LEAD.value,
+    CrmStage.HOT_LEAD.value,
     CrmStage.POST_CARE.value,
     CrmStage.LOST.value,
 }

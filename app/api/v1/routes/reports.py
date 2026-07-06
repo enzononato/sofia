@@ -39,7 +39,8 @@ _CONVERTED_STAGES = (
 
 _STAGE_LABELS = {
     CrmStage.NEW_LEAD.value: "Novo Lead",
-    CrmStage.IN_CONVERSATION.value: "Em conversa",
+    CrmStage.COLD_LEAD.value: "Lead Frio",
+    CrmStage.HOT_LEAD.value: "Lead Quente",
     CrmStage.SCHEDULED.value: "Agendado",
     CrmStage.ATTENDED.value: "Compareceu",
     CrmStage.POST_CARE.value: "Pós-atendimento",

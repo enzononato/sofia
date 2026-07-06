@@ -14,16 +14,17 @@ import {
 } from "@dnd-kit/core";
 import { CrmContact, CrmStage, useMoveCrmStage } from "@/hooks/useCrm";
 import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar";
-import { User, Bot, GripVertical } from "lucide-react";
+import { Bot, GripVertical } from "lucide-react";
 import { cn } from "@/lib/utils";
 
 const STAGES: { id: CrmStage; label: string; accent: string; dot: string }[] = [
   { id: "new_lead", label: "Novo Lead", accent: "border-t-slate-500", dot: "bg-slate-500" },
-  { id: "in_conversation", label: "Em conversa", accent: "border-t-primary", dot: "bg-primary" },
+  { id: "cold_lead", label: "Lead Frio", accent: "border-t-sky-500", dot: "bg-sky-500" },
+  { id: "hot_lead", label: "Lead Quente", accent: "border-t-orange-500", dot: "bg-orange-500" },
   { id: "scheduled", label: "Agendado", accent: "border-t-amber-500", dot: "bg-amber-500" },
   { id: "attended", label: "Compareceu", accent: "border-t-emerald-500", dot: "bg-emerald-500" },
-  { id: "post_care", label: "Pós-atendimento", accent: "border-t-purple-500", dot: "bg-purple-500" },
-  { id: "lost", label: "Perdido", accent: "border-t-destructive", dot: "bg-destructive" },
+  { id: "post_care", label: "Pós-atendimento", accent: "border-t-violet-500", dot: "bg-violet-500" },
+  { id: "lost", label: "Perdido", accent: "border-t-rose-500", dot: "bg-rose-500" },
 ];
 
 function initialsOf(name: string) {
@@ -173,7 +174,13 @@ export function KanbanBoard({ contacts }: { contacts: CrmContact[] }) {
           <Column key={s.id} stage={s} contacts={contacts.filter((c) => c.crm_stage === s.id)} />
         ))}
       </div>
-      <DragOverlay>{activeContact ? <CardOverlay contact={activeContact} /> : null}</DragOverlay>
+      {/* dropAnimation={null}: the default animation flies the overlay back to
+          the source card's ORIGINAL rect — but on a stage change the card has
+          already moved to another column, so the overlay animated to the wrong
+          place, reading as a jump/flicker. Dropping instantly is clean. */}
+      <DragOverlay dropAnimation={null}>
+        {activeContact ? <CardOverlay contact={activeContact} /> : null}
+      </DragOverlay>
     </DndContext>
   );
 }

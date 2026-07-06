@@ -288,7 +288,12 @@ export default function ServicesPage() {
                           </span>
                         </div>
                       ) : (
-                        <span className="text-sm text-muted-foreground/40">—</span>
+                        <span
+                          title="Este serviço não tem valor fixo tabelado — o preço é avaliado e informado durante a consulta presencial."
+                          className="inline-flex w-fit items-center rounded-full border border-amber-500/20 bg-amber-500/5 px-2 py-0.5 font-mono text-[9px] uppercase tracking-wider text-amber-400/90 cursor-help"
+                        >
+                          Valor na consulta
+                        </span>
                       )}
                     </td>
 

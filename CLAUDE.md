@@ -57,7 +57,7 @@ SQLAlchemy models in `app/models/`. All business models extend `TenantScopedMixi
 
 If `DATABASE_SCHEMA` env var is set (e.g., `sofia`), the engine sets `search_path` via `connect_args` and Alembic uses `version_table_schema` — no code changes needed per table.
 
-Migrations are linear (Alembic). Current head: `b2c3d4e5f6a7`. When adding a new model, register it in `app/models/__init__.py` so Alembic auto-detects it.
+Migrations are linear (Alembic). Current head: `c3d4e5f6a7b8`. When adding a new model, register it in `app/models/__init__.py` so Alembic auto-detects it.
 
 ### Key models
 - `Tenant` — clinic, has `settings` (JSONB) and `ai_config` (JSONB)
@@ -88,9 +88,9 @@ All behaviors can be disabled independently via env flags (`MESSAGE_BATCHING_ENA
 Scheduling modes in `ai_config.scheduling_mode`: `capacity` (N simultaneous per clinic) or `per_professional` (per-professional availability).
 
 ### CRM auto-classification
-Two-layer approach:
-1. **Deterministic** (`app/services/crm.py`): `mark_inbound()` on webhook, `mark_scheduled()` on appointment create, `mark_attended()` on appointment completion. Uses set logic (`_SCHEDULED_OR_PAST`, `_ATTENDED_OR_PAST`) so `lost` contacts can be revived.
-2. **AI tool** `set_crm_stage`: Sofia can set `in_conversation`, `post_care`, `lost`. Never sets `scheduled`/`attended` (those are factual). Manual drags from the Kanban set `crm_stage_source="manual"`.
+Kanban stages (`CrmStage`): `new_lead` → `cold_lead` / `hot_lead` → `scheduled` → `attended` → `post_care`, plus `lost`. A contact stays in `new_lead` until Sofia qualifies it as `cold_lead` (low intent) or `hot_lead` (clear buying intent) — inbound messages no longer auto-advance the stage. Two-layer approach:
+1. **Deterministic** (`app/services/crm.py`): `mark_inbound()` only records `last_inbound_at` (does NOT change stage), `mark_scheduled()` on appointment create, `mark_attended()` on appointment completion. Uses set logic (`_SCHEDULED_OR_PAST`, `_ATTENDED_OR_PAST`) so `lost` contacts can be revived.
+2. **AI tool** `set_crm_stage`: Sofia can set `cold_lead`, `hot_lead`, `post_care`, `lost`. Never sets `scheduled`/`attended` (those are factual). Manual drags from the Kanban set `crm_stage_source="manual"`.
 
 ### Background scheduler
 `app/services/scheduler.py` — APScheduler `AsyncIOScheduler` started in FastAPI lifespan. Three jobs: appointment reminders, re-engagement, Google Calendar reconciliation. Per-clinic config in `tenant.settings.followups` (read by `app/services/followups.py`). **Run only 1 uvicorn worker** in production to avoid duplicate sends.
