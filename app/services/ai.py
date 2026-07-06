@@ -124,7 +124,10 @@ vaga ("vou pensar", "depois eu vejo"), puxe assunto com curiosidade real sobre o
 decisão (preço? horário? insegurança com o procedimento?) antes de sair respondendo algo que talvez \
 nem seja o problema de verdade. Só depois de entender o que está por trás, trate a objeção específica \
 (ver casos comuns abaixo) — e termine sempre reconduzindo a um próximo passo pequeno e concreto (um \
-horário, uma pergunta fechada), nunca deixando a conversa aberta tipo "qualquer coisa é só chamar".
+horário, uma pergunta fechada), nunca deixando a conversa aberta tipo "qualquer coisa é só chamar". \
+Em TODO turno em que o paciente der um sinal classificável (interesse claro, hesitação, desinteresse), \
+chame set_crm_stage na mesma resposta em que você sonda ou responde — sondar/objetar e classificar \
+não são passos alternativos, são as duas coisas juntas na mesma mensagem.
 
 Casos comuns:
 - Preço ("tá caro", "não tenho como pagar agora"): reforce o valor/resultado entregue e mencione as \
@@ -136,10 +139,11 @@ ofereça 2-3 horários alternativos concretos, incluindo opções menos óbvias 
 - Insegurança/medo ("tenho medo", "nunca fiz isso", "dói?", "é seguro?"): acolha com empatia real e \
 explique o procedimento em termos simples e tranquilizadores usando só informações reais da clínica \
 — nunca minimize o medo do paciente nem invente garantia de resultado ou dado clínico que não tenha.
-- Adiamento vago ("vou pensar", "depois eu vejo", "te aviso"): pergunte com leveza o que ajudaria a \
-decidir agora; se o paciente insistir em adiar, aceite graciosamente e deixe a porta aberta ("sem \
-problema, quando quiser é só me chamar"). No CRM isso é 'cold_lead' (segue interessado, mas esfriou), \
-nunca 'lost' — só marque 'lost' se ele disser claramente que não tem mais interesse.
+- Adiamento vago ("vou pensar", "depois eu vejo", "te aviso"): já chame set_crm_stage('cold_lead') \
+nesta mesma resposta — isso é sempre 'cold_lead' (segue interessado, mas esfriou), nunca 'lost' (só \
+marque 'lost' se ele disser claramente que não tem mais interesse). Classificar não impede de também \
+puxar assunto: pergunte com leveza o que ajudaria a decidir agora; se o paciente insistir em adiar, \
+aceite graciosamente e deixe a porta aberta ("sem problema, quando quiser é só me chamar").
 - Precisa consultar terceiro ("vou ver com minha esposa/marido/família"): normalize e ofereça ajudar \
 a resolver dúvidas que facilitem essa conversa (preço, horário, o que é o procedimento) — sem \
 pressionar por resposta imediata.
@@ -355,6 +359,13 @@ async def generate_reply(
         temperature=temperature,
         max_output_tokens=max_output_tokens,
         tools=[CLINIC_TOOLS],
+        # Disable "thinking": gemini-2.5-flash thinks by default, and those
+        # thinking tokens count against max_output_tokens. On tool-calling turns
+        # that could burn the whole budget before any part was emitted, yielding
+        # finish_reason=MAX_TOKENS with no content. A WhatsApp secretary doing
+        # function calls doesn't need extended reasoning — turning it off makes
+        # replies snappier and avoids the empty-response failure mode.
+        thinking_config=types.ThinkingConfig(thinking_budget=0),
     )
 
     # Tool-calling loop
@@ -390,9 +401,35 @@ async def generate_reply(
         candidate = response.candidates[0]
         response_content = candidate.content
 
+        # Gemini can return a candidate with no content/parts — e.g. finish_reason
+        # MAX_TOKENS (thinking models can burn the whole budget before emitting a
+        # part), a safety block, or RECITATION. Iterating None here would crash the
+        # whole reply, so degrade gracefully to whatever text we have.
+        parts = response_content.parts if response_content is not None else None
+        if not parts:
+            finish_reason = getattr(candidate, "finish_reason", None)
+            logger.warning(
+                "gemini_empty_parts",
+                extra={
+                    "finish_reason": str(finish_reason),
+                    "iteration": iteration,
+                    "model": model,
+                    "tenant_id": str(tenant.id),
+                    "contact_id": str(contact.id),
+                },
+            )
+            fallback = (getattr(response, "text", None) or "").strip()
+            if fallback:
+                return fallback, model
+            return (
+                "Desculpe, não consegui formular a resposta agora. "
+                "Pode reenviar sua última mensagem, por favor?",
+                model,
+            )
+
         # Check if the response contains a function call
         function_call_part = next(
-            (p for p in response_content.parts if p.function_call is not None),
+            (p for p in parts if p.function_call is not None),
             None,
         )
 
@@ -469,6 +506,7 @@ async def generate_reply(
             temperature=temperature,
             max_output_tokens=max_output_tokens,
             # No tools → the model cannot call a function and must produce text.
+            thinking_config=types.ThinkingConfig(thinking_budget=0),
         )
         final_response = await client.aio.models.generate_content(
             model=model,

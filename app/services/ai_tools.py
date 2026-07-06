@@ -252,7 +252,11 @@ _set_crm_stage_decl = types.FunctionDeclaration(
         "'post_care' (já foi atendido e está em acompanhamento). "
         "Reclassifique quando a temperatura mudar (ex.: um cold_lead que volta animado vira hot_lead). "
         "NÃO use para 'scheduled'/'attended' — esses são definidos automaticamente ao agendar/concluir. "
-        "Não invente: só classifique com base no que a conversa realmente indicar."
+        "Não invente: só classifique com base no que a conversa realmente indicar. "
+        "IMPORTANTE: classificar é uma ação silenciosa de registro interno — não muda o que você fala "
+        "com o paciente. Sempre que a mensagem dele der um sinal claro de frio/quente/perdido, chame "
+        "esta ferramenta NA MESMA resposta, mesmo que você também vá fazer uma pergunta de sondagem ou "
+        "tratar uma objeção no texto — as duas coisas acontecem juntas, uma não substitui a outra."
     ),
     parameters=types.Schema(
         type=types.Type.OBJECT,
@@ -614,10 +618,13 @@ async def _check_availability(
     tz = sched["tz"]
     capacity = sched["capacity"]
 
+    weekday_pt = _WEEKDAY_NAME_PT[target_date.isoweekday()]
+
     # Closed day — return early before any DB work
     if target_date.isoweekday() not in sched["working_days"]:
         return {
             "date": args["date"],
+            "weekday": weekday_pt,
             "available_slots": [],
             "message": "A clínica não atende neste dia da semana.",
         }
@@ -680,11 +687,17 @@ async def _check_availability(
     if not available:
         return {
             "date": args["date"],
+            "weekday": weekday_pt,
             "available_slots": [],
             "message": "Não há horários disponíveis nesta data.",
         }
 
-    return {"date": args["date"], "available_slots": available, "timezone": tz.key}
+    return {
+        "date": args["date"],
+        "weekday": weekday_pt,
+        "available_slots": available,
+        "timezone": tz.key,
+    }
 
 
 async def _create_appointment(
@@ -1305,6 +1318,7 @@ async def _check_availability_pp(
         return {"error": "Preciso saber o serviço para verificar a disponibilidade. Use list_services primeiro."}
 
     tz = _clinic_tz(tenant_settings)
+    weekday_pt = _WEEKDAY_NAME_PT[target_date.isoweekday()]
     slot_dur = timedelta(minutes=service.duration_minutes)
     granularity = _granularity(tenant_settings, service.duration_minutes)
 
@@ -1317,6 +1331,7 @@ async def _check_availability_pp(
     if not professionals:
         return {
             "date": args["date"],
+            "weekday": weekday_pt,
             "available_slots": [],
             "message": "Nenhum profissional realiza este serviço ainda.",
         }
@@ -1340,6 +1355,7 @@ async def _check_availability_pp(
     if not agg:
         return {
             "date": args["date"],
+            "weekday": weekday_pt,
             "available_slots": [],
             "message": "Não há horários disponíveis nesta data.",
         }
@@ -1347,6 +1363,7 @@ async def _check_availability_pp(
     times = sorted(agg.keys())
     return {
         "date": args["date"],
+        "weekday": weekday_pt,
         "service_id": str(service.id),
         "timezone": tz.key,
         "available_slots": times,

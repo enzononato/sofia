@@ -165,27 +165,34 @@ def build_context_block(
         f"{local_now.strftime('%d/%m/%Y')} (fuso {tz.key})."
     )
     lines.append("")
-    lines.append("--- CALENDÁRIO (tabela de referência — NUNCA calcule datas de cabeça, sempre localize a linha exata aqui) ---")
+    lines.append(
+        "--- CALENDÁRIO (fonte única de datas — NUNCA calcule de cabeça; copie o valor ISO exato da linha) ---"
+    )
+    lines.append(
+        "Cada linha liga um dia a data que você DEVE usar no campo `date`/`scheduled_at` das ferramentas."
+    )
     for i in range(14):
         d = local_now + timedelta(days=i)
         weekday_name = days_of_week[d.weekday()]
         if i == 0:
-            label = f"Hoje ({weekday_name})"
+            when = "hoje"
         elif i == 1:
-            label = f"Amanhã ({weekday_name})"
+            when = "amanhã"
         elif i < 7:
-            label = weekday_name
+            when = "esta semana"
         else:
-            label = f"{weekday_name} que vem"
-        lines.append(f"{label} = {d.strftime('%d/%m/%Y')}")
+            when = "semana que vem"
+        # e.g. "quinta-feira (esta semana) -> date=2026-07-09  [09/07/2026]"
+        lines.append(
+            f"{weekday_name} ({when}) -> date={d.strftime('%Y-%m-%d')}  [{d.strftime('%d/%m/%Y')}]"
+        )
     lines.append(
-        "Para QUALQUER data que o paciente mencionar (hoje, amanhã, nome de dia da semana, "
-        "'que vem', data numérica, etc.), localize a linha exata na tabela acima e use essa data — "
-        "nunca some ou subtraia dias de cabeça, nunca invente ou suponha datas. "
-        "Se o paciente disser só o nome do dia sem 'que vem' (ex.: 'sexta-feira'), use a ocorrência "
-        "desta semana (mesmo que seja hoje). Se disser 'que vem'/'da semana que vem'/'próxima', use a "
-        "ocorrência marcada como 'que vem'. Isso vale também para preencher os campos de data das ferramentas "
-        "(date, scheduled_at) — nunca calcule o valor ISO manualmente, copie da tabela."
+        "Regras de leitura: encontre a linha cujo dia da semana é o que o paciente disse e use o `date=` "
+        "DAQUELA linha, sem contar dias. Se ele disser só o nome do dia (ex.: 'sexta-feira'), use a linha "
+        "'(esta semana)'; se disser 'que vem'/'próxima', use a linha '(semana que vem)'. Ao responder, "
+        "confira que o dia da semana que você vai escrever é o MESMO da linha que você usou. "
+        "Depois de chamar check_availability, o resultado traz o campo 'weekday' da data consultada: se ele "
+        "não for o dia que o paciente pediu, você pegou a data errada — corrija e chame de novo."
     )
     lines.append("")
     lines.append("--- CONTEXTO DO PACIENTE ---")
