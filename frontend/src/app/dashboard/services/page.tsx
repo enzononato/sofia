@@ -275,9 +275,17 @@ export default function ServicesPage() {
                     {/* Price */}
                     <td className="px-4 py-5">
                       {service.price != null ? (
-                        <div className="flex items-center gap-2 text-foreground">
-                          <DollarSign className="h-4 w-4 text-secondary/80" />
-                          <span className="text-sm font-sans whitespace-nowrap">R$ {money(Number(service.price))}</span>
+                        <div className="flex flex-col items-start gap-1.5">
+                          <div className="flex items-center gap-2 text-foreground">
+                            <DollarSign className="h-4 w-4 text-secondary/80" />
+                            <span className="text-sm font-sans whitespace-nowrap">R$ {money(Number(service.price))}</span>
+                          </div>
+                          <span
+                            title="Este valor corresponde a uma única consulta/sessão, não a um pacote fechado."
+                            className="inline-flex w-fit items-center rounded-full border border-white/10 bg-white/5 px-2 py-0.5 font-mono text-[9px] uppercase tracking-wider text-muted-foreground cursor-help"
+                          >
+                            Por consulta
+                          </span>
                         </div>
                       ) : (
                         <span className="text-sm text-muted-foreground/40">—</span>

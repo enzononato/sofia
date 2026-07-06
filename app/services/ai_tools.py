@@ -44,8 +44,11 @@ _list_services_decl = types.FunctionDeclaration(
     name="list_services",
     description=(
         "Lista todos os serviços / procedimentos ativos oferecidos pela clínica, "
-        "incluindo nome, duração em minutos e preço. Use quando o paciente perguntar "
-        "o que a clínica oferece ou antes de verificar disponibilidade."
+        "incluindo nome, duração em minutos e preço. O preço retornado é sempre "
+        "por consulta/sessão avulsa — nunca um pacote fechado ou tratamento completo. "
+        "Ao informar valores ao paciente, deixe claro que o preço é por consulta. "
+        "Use quando o paciente perguntar o que a clínica oferece ou antes de "
+        "verificar disponibilidade."
     ),
     parameters=types.Schema(type=types.Type.OBJECT, properties={}),
 )

@@ -41,49 +41,70 @@ function previewOf(msg?: CrmContact["last_message"]) {
   }
 }
 
-function Card({ contact, overlay = false }: { contact: CrmContact; overlay?: boolean }) {
-  const { attributes, listeners, setNodeRef, transform, isDragging } = useDraggable({
+function CardBody({
+  contact,
+  dragHandleProps,
+}: {
+  contact: CrmContact;
+  dragHandleProps?: Record<string, unknown>;
+}) {
+  return (
+    <div className="flex items-start gap-2">
+      <button
+        {...(dragHandleProps ?? {})}
+        className="mt-0.5 text-muted-foreground/40 hover:text-muted-foreground cursor-grab active:cursor-grabbing touch-none h-6 w-6 flex items-center justify-center rounded hover:bg-white/5 transition-all"
+        aria-label="Arrastar"
+      >
+        <GripVertical className="h-4 w-4" />
+      </button>
+      <Avatar className="h-8 w-8 border border-white/10 flex-shrink-0">
+        <AvatarImage src={contact.profile_picture_url || ""} />
+        <AvatarFallback className="bg-primary/5 text-primary text-xs font-mono">
+          {initialsOf(contact.full_name)}
+        </AvatarFallback>
+      </Avatar>
+      <div className="flex-1 min-w-0">
+        <p className="font-heading text-sm font-semibold truncate text-foreground leading-tight">{contact.full_name}</p>
+        <p className="text-xs text-muted-foreground truncate opacity-85 mt-1 font-sans">{previewOf(contact.last_message)}</p>
+        {contact.crm_stage_source === "ai" && (
+          <span className="mt-2 inline-flex items-center gap-1 text-[9px] font-mono uppercase tracking-wider text-primary/70 font-semibold">
+            <Bot className="h-3 w-3 animate-pulse text-primary" /> Sofia AI
+          </span>
+        )}
+      </div>
+    </div>
+  );
+}
+
+// Card rendered in place inside a column. It never follows the pointer itself
+// (no `transform` style) — DragOverlay (rendered in a portal) is what visually
+// tracks the cursor. Applying the drag transform here too used to make this
+// card move as well, get clipped by the column's overflow-y-auto, and show as
+// a second "ghost" behind the overlay copy.
+function Card({ contact }: { contact: CrmContact }) {
+  const { attributes, listeners, setNodeRef, isDragging } = useDraggable({
     id: contact.id,
   });
-  const style = transform
-    ? { transform: `translate3d(${transform.x}px, ${transform.y}px, 0)` }
-    : undefined;
 
   return (
     <div
       ref={setNodeRef}
-      style={style}
       className={cn(
         "rounded-xl border border-white/10 bg-background/55 backdrop-blur-md p-3 shadow-md select-none transition-all hover:border-primary/20",
-        isDragging && !overlay && "opacity-40",
-        overlay && "shadow-2xl ring-1 ring-primary/30 rotate-1 bg-background/95 border-white/20",
+        isDragging && "opacity-40",
       )}
     >
-      <div className="flex items-start gap-2">
-        <button
-          {...listeners}
-          {...attributes}
-          className="mt-0.5 text-muted-foreground/40 hover:text-muted-foreground cursor-grab active:cursor-grabbing touch-none h-6 w-6 flex items-center justify-center rounded hover:bg-white/5 transition-all"
-          aria-label="Arrastar"
-        >
-          <GripVertical className="h-4 w-4" />
-        </button>
-        <Avatar className="h-8 w-8 border border-white/10 flex-shrink-0">
-          <AvatarImage src={contact.profile_picture_url || ""} />
-          <AvatarFallback className="bg-primary/5 text-primary text-xs font-mono">
-            {initialsOf(contact.full_name)}
-          </AvatarFallback>
-        </Avatar>
-        <div className="flex-1 min-w-0">
-          <p className="font-heading text-sm font-semibold truncate text-foreground leading-tight">{contact.full_name}</p>
-          <p className="text-xs text-muted-foreground truncate opacity-85 mt-1 font-sans">{previewOf(contact.last_message)}</p>
-          {contact.crm_stage_source === "ai" && (
-            <span className="mt-2 inline-flex items-center gap-1 text-[9px] font-mono uppercase tracking-wider text-primary/70 font-semibold">
-              <Bot className="h-3 w-3 animate-pulse text-primary" /> Sofia AI
-            </span>
-          )}
-        </div>
-      </div>
+      <CardBody contact={contact} dragHandleProps={{ ...attributes, ...listeners }} />
+    </div>
+  );
+}
+
+// Static visual copy shown in DragOverlay — no useDraggable/transform of its
+// own; DragOverlay already positions it following the pointer.
+function CardOverlay({ contact }: { contact: CrmContact }) {
+  return (
+    <div className="rounded-xl border border-white/20 bg-background/95 backdrop-blur-md p-3 shadow-2xl ring-1 ring-primary/30 rotate-1 select-none cursor-grabbing">
+      <CardBody contact={contact} />
     </div>
   );
 }
@@ -152,7 +173,7 @@ export function KanbanBoard({ contacts }: { contacts: CrmContact[] }) {
           <Column key={s.id} stage={s} contacts={contacts.filter((c) => c.crm_stage === s.id)} />
         ))}
       </div>
-      <DragOverlay>{activeContact ? <Card contact={activeContact} overlay /> : null}</DragOverlay>
+      <DragOverlay>{activeContact ? <CardOverlay contact={activeContact} /> : null}</DragOverlay>
     </DndContext>
   );
 }

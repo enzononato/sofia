@@ -156,25 +156,36 @@ def build_context_block(
     now = datetime.now(timezone.utc)
     tz = _clinic_tz(tenant_settings or {})
     local_now = now.astimezone(tz)
-    tomorrow = local_now + timedelta(days=1)
-    day_after = local_now + timedelta(days=2)
-    next_week = local_now + timedelta(days=7)
 
     days_of_week = ['Segunda-feira', 'Terça-feira', 'Quarta-feira', 'Quinta-feira', 'Sexta-feira', 'Sábado', 'Domingo']
-    today_name = days_of_week[local_now.weekday()]
-    tomorrow_name = days_of_week[tomorrow.weekday()]
-    day_after_name = days_of_week[day_after.weekday()]
-    next_week_name = days_of_week[next_week.weekday()]
 
     lines: list[str] = ["--- CONTEXTO ATUAL ---"]
-    lines.append(f"Hoje é {today_name}, dia {local_now.strftime('%d/%m/%Y')} (hora local agora: {local_now.strftime('%H:%M')} - fuso {tz.key})")
-    lines.append(f"Amanhã é {tomorrow_name}, dia {tomorrow.strftime('%d/%m/%Y')}")
-    lines.append(f"Depois de amanhã é {day_after_name}, dia {day_after.strftime('%d/%m/%Y')}")
-    lines.append(f"Mesmo dia na próxima semana é {next_week_name}, dia {next_week.strftime('%d/%m/%Y')}")
     lines.append(
-        "Sempre use as datas reais acima como referência absoluta para datas relativas "
-        "(hoje, amanhã, próxima segunda, etc.). Nunca invente ou suponha datas. "
-        "Não ofereça datas cujo dia da semana não coincida com as referências acima."
+        f"Agora são {local_now.strftime('%H:%M')} de {days_of_week[local_now.weekday()]}, "
+        f"{local_now.strftime('%d/%m/%Y')} (fuso {tz.key})."
+    )
+    lines.append("")
+    lines.append("--- CALENDÁRIO (tabela de referência — NUNCA calcule datas de cabeça, sempre localize a linha exata aqui) ---")
+    for i in range(14):
+        d = local_now + timedelta(days=i)
+        weekday_name = days_of_week[d.weekday()]
+        if i == 0:
+            label = f"Hoje ({weekday_name})"
+        elif i == 1:
+            label = f"Amanhã ({weekday_name})"
+        elif i < 7:
+            label = weekday_name
+        else:
+            label = f"{weekday_name} que vem"
+        lines.append(f"{label} = {d.strftime('%d/%m/%Y')}")
+    lines.append(
+        "Para QUALQUER data que o paciente mencionar (hoje, amanhã, nome de dia da semana, "
+        "'que vem', data numérica, etc.), localize a linha exata na tabela acima e use essa data — "
+        "nunca some ou subtraia dias de cabeça, nunca invente ou suponha datas. "
+        "Se o paciente disser só o nome do dia sem 'que vem' (ex.: 'sexta-feira'), use a ocorrência "
+        "desta semana (mesmo que seja hoje). Se disser 'que vem'/'da semana que vem'/'próxima', use a "
+        "ocorrência marcada como 'que vem'. Isso vale também para preencher os campos de data das ferramentas "
+        "(date, scheduled_at) — nunca calcule o valor ISO manualmente, copie da tabela."
     )
     lines.append("")
     lines.append("--- CONTEXTO DO PACIENTE ---")
