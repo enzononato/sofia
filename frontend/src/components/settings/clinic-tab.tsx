@@ -41,6 +41,11 @@ export function ClinicTab({ tenant }: { tenant: TenantProfile }) {
     defaultSettings.payment_methods || []
   );
   const [customMethod, setCustomMethod] = useState("");
+  // Max credit-card installments. Empty = not configured: Sofia will say the
+  // installment plan is arranged at the clinic instead of inventing a number.
+  const [maxInstallments, setMaxInstallments] = useState<string>(
+    defaultSettings.max_installments ? String(defaultSettings.max_installments) : ""
+  );
 
   const { register, handleSubmit, formState: { errors } } = useForm<FormValues>({
     resolver: zodResolver(formSchema),
@@ -78,6 +83,10 @@ export function ClinicTab({ tenant }: { tenant: TenantProfile }) {
           instagram: data.instagram || undefined,
           additional_info: data.additional_info || undefined,
           payment_methods: paymentMethods.length > 0 ? paymentMethods : undefined,
+          max_installments:
+            maxInstallments && Number(maxInstallments) >= 2
+              ? Math.min(24, Math.floor(Number(maxInstallments)))
+              : undefined,
         }
       };
 
@@ -256,6 +265,30 @@ export function ClinicTab({ tenant }: { tenant: TenantProfile }) {
                       </button>
                     ))}
                   </div>
+                </div>
+
+                {/* Max installments — structured data so Sofia never invents "até 3x" */}
+                <div className="mt-4 rounded-2xl border border-white/10 bg-white/[0.03] p-4">
+                  <Label htmlFor="max_installments" className="font-mono text-[10px] uppercase tracking-wider text-muted-foreground/80 flex items-center gap-2">
+                    <CreditCard className="h-3.5 w-3.5 text-muted-foreground/60" />
+                    Parcelamento máximo no cartão de crédito
+                  </Label>
+                  <div className="mt-2 flex items-center gap-3">
+                    <Input
+                      id="max_installments"
+                      type="number"
+                      min={2}
+                      max={24}
+                      value={maxInstallments}
+                      onChange={(e) => setMaxInstallments(e.target.value)}
+                      placeholder="Ex: 3"
+                      className="h-12 w-28 rounded-xl border-white/10 bg-background/55 text-foreground px-4 text-sm focus-visible:ring-1 focus-visible:ring-primary/50 focus:border-primary/50 transition-all"
+                    />
+                    <span className="text-xs text-muted-foreground font-sans">vezes sem informar = a Sofia dirá que o parcelamento é combinado na clínica</span>
+                  </div>
+                  <p className="text-[11px] text-muted-foreground/70 font-sans mt-2 leading-relaxed">
+                    A Sofia só informa parcelamento aos pacientes se este número estiver preenchido — ela nunca inventa condições de pagamento.
+                  </p>
                 </div>
               </div>
 

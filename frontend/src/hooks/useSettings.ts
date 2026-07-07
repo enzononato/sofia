@@ -22,6 +22,8 @@ export interface TenantSettings {
     email?: string;
     instagram?: string;
     payment_methods?: string[];
+    /** Max credit-card installments Sofia may quote. Unset = arranged at the clinic. */
+    max_installments?: number;
     additional_info?: string;
   };
   followups?: {

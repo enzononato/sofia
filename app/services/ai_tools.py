@@ -1006,6 +1006,17 @@ async def _get_clinic_info(tenant_settings: dict, tenant_name: str | None = None
     schedule = tenant_settings.get("schedule", {}) or {}
     working_days = schedule.get("working_days", [1, 2, 3, 4, 5])
 
+    # Installments: only a real configured number is exposed. When unset, we say
+    # so explicitly ("não configurado") — a live production chat showed the model
+    # filling this gap with an invented "até 3 vezes" when the field was absent.
+    raw_installments = clinic.get("max_installments")
+    try:
+        max_installments = int(raw_installments) if raw_installments else None
+        if max_installments is not None and max_installments < 2:
+            max_installments = None
+    except (TypeError, ValueError):
+        max_installments = None
+
     return {
         "name": tenant_name,
         "address": clinic.get("address"),
@@ -1013,6 +1024,12 @@ async def _get_clinic_info(tenant_settings: dict, tenant_name: str | None = None
         "email": clinic.get("email"),
         "instagram": clinic.get("instagram"),
         "payment_methods": clinic.get("payment_methods", []),
+        "max_installments": max_installments,
+        "installments_info": (
+            f"Parcelamento em até {max_installments}x no cartão de crédito."
+            if max_installments
+            else "Parcelamento não configurado — a quantidade de parcelas é combinada na clínica; NÃO invente um número."
+        ),
         "additional_info": clinic.get("additional_info"),
         "schedule": {
             "timezone": schedule.get("timezone") or _DEFAULT_TZ,

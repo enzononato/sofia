@@ -31,6 +31,15 @@ Legenda: ✅ feito no código · 🔴 bloqueador · 🟡 recomendado · ⏳ só 
 - [x] **Alertas de erro por e-mail** — handler que envia e-mail em log de nível ERROR,
   em thread separada (não bloqueia) e com throttle anti-tempestade. Desligado por
   padrão; ligar via `ALERT_EMAIL_ENABLED=true` + SMTP no `.env`/EasyPanel. (`app/core/alerting.py`)
+- [x] **Sofia inventando parcelamento ("até 3x")** — conversa real mostrou a Sofia
+  afirmando um número de parcelas que não existe nos dados. Novo campo estruturado
+  `max_installments` na aba Clínica (Configurações → formas de pagamento); a tool
+  `get_clinic_info` agora expõe o valor (ou avisa "não configurado — não invente") e o
+  prompt proíbe citar parcelas sem o dado. Reproduzido e validado com o cenário real.
+  (`ai_tools.py`, `ai.py`, `clinic-tab.tsx`, `useSettings.ts`)
+- [x] **Deploy que morria se o Postgres não estivesse resolvível** — o CMD do Dockerfile
+  agora tenta a migração 12x com 5s de pausa antes de desistir (corrida de DNS do
+  EasyPanel vista nos logs de deploy). (`Dockerfile`)
 
 > ⚠️ **Tudo isso só chega aos pacientes após o REDEPLOY em produção** (ver bloqueador abaixo).
 
@@ -38,10 +47,11 @@ Legenda: ✅ feito no código · 🔴 bloqueador · 🟡 recomendado · ⏳ só 
 
 ## 🔴 Bloqueadores — só você pode fazer (painéis externos)
 
-- [ ] ⏳ **Redeploy do backend + frontend no EasyPanel**
-  - Todas as correções acima estão no git mas produção ainda roda a versão antiga
-    (a conversa real com data errada é prova disso).
-  - Fazer redeploy do backend **e** do frontend.
+- [ ] ⏳ **Redeploy do backend + frontend no EasyPanel** — PARCIAL
+  - ✅ Backend redeployado em 07/07 (logs confirmam: migração `c3d4e5f6a7b8` aplicada,
+    app saudável). Porém os commits de 07/07 à tarde (parcelamento, retry do deploy)
+    exigem **novo** redeploy do backend + rebuild do frontend (campo de parcelas na aba Clínica).
+  - Frontend: confirmar se já foi redeployado com o design novo.
 
 - [ ] ⏳ **Rotacionar credenciais expostas no chat**
   - Admin token da UAZAPI (`UAZAPI_ADMIN_TOKEN`) e a API key do Google (Stitch).
@@ -84,12 +94,15 @@ Legenda: ✅ feito no código · 🔴 bloqueador · 🟡 recomendado · ⏳ só 
 
 ## 🟢 Bom ter (pode esperar o pós-lançamento)
 
-- [ ] **Testes automatizados** — hoje não há suíte formal (os testes desta sessão foram
-  harnesses de conversa E2E manuais). Vale criar testes de regressão para a Sofia.
-- [ ] **Handoff humano** — a Sofia reconhecer quando não sabe/não pode resolver e passar
-  para um atendente (o flag `ai_paused` já existe no modelo; falta a Sofia acioná-lo).
+> Os 3 itens de código abaixo têm **plano de implementação detalhado** em
+> [`PLANO_IMPLEMENTACAO.md`](PLANO_IMPLEMENTACAO.md), pronto para execução.
+
+- [ ] **Handoff humano** (Item 1 do plano) — a Sofia reconhecer quando não sabe/não pode
+  resolver e pausar a si mesma (`request_human_handoff`; o flag `ai_paused` e a UI do
+  Inbox já existem).
+- [ ] **Testes automatizados** (Item 2 do plano) — suíte pytest para a lógica crítica.
+- [ ] **Página "Pacientes" dedicada** (Item 3 do plano) — rota própria com busca/filtros.
 - [ ] **Confirmar presença "digitando" com log real** em produção.
-- [ ] **Página "Pacientes" dedicada** (hoje coberto via Inbox/CRM).
 - [ ] **Termos de uso / contrato de adesão** para as clínicas clientes.
 - [ ] **Teste de carga** com múltiplos tenants simultâneos.
 
