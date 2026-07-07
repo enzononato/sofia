@@ -119,7 +119,7 @@ export default function ServicesPage() {
   const avgDuration = services && services.length
     ? Math.round(services.reduce((sum, s) => sum + s.duration_minutes, 0) / services.length)
     : 0;
-  const pricedServices = (services ?? []).filter(s => s.price != null).map(s => Number(s.price));
+  const pricedServices = (services ?? []).filter(s => s.price != null && Number(s.price) > 0).map(s => Number(s.price));
   const avgPrice = pricedServices.length
     ? pricedServices.reduce((a, b) => a + b, 0) / pricedServices.length
     : null;
@@ -272,9 +272,9 @@ export default function ServicesPage() {
                       </div>
                     </td>
 
-                    {/* Price */}
+                    {/* Price — treat 0/unset alike: "assessed in consultation", never "R$ 0,00" */}
                     <td className="px-4 py-5">
-                      {service.price != null ? (
+                      {service.price != null && Number(service.price) > 0 ? (
                         <div className="flex flex-col items-start gap-1.5">
                           <div className="flex items-center gap-2 text-foreground">
                             <DollarSign className="h-4 w-4 text-secondary/80" />

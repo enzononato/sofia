@@ -575,13 +575,23 @@ async def _list_services(
         )
         query = query.where(Service.id.in_(linked))
     services = (await db.execute(query.order_by(Service.name))).scalars().all()
+
+    def _price(s: Service) -> str | None:
+        # A price of 0 (or negative) means the clinic never filled it in — it is
+        # NOT "free". Report it as unset so Sofia says the value is assessed in
+        # the consultation instead of announcing "R$ 0,00".
+        if s.price is None or s.price <= 0:
+            return None
+        return str(s.price)
+
     return {
         "services": [
             {
                 "id": str(s.id),
                 "name": s.name,
                 "duration_minutes": s.duration_minutes,
-                "price": str(s.price) if s.price is not None else None,
+                "price": _price(s),
+                "price_unset": _price(s) is None,
                 "description": s.description,
             }
             for s in services

@@ -97,12 +97,22 @@ def configure_logging() -> None:
     for h in list(root.handlers):
         root.removeHandler(h)
 
+    formatter: logging.Formatter = (
+        JsonFormatter() if settings.LOG_FORMAT == "json" else _DevFormatter()
+    )
     handler = logging.StreamHandler(sys.stdout)
-    if settings.LOG_FORMAT == "json":
-        handler.setFormatter(JsonFormatter())
-    else:
-        handler.setFormatter(_DevFormatter())
+    handler.setFormatter(formatter)
     root.addHandler(handler)
+
+    # Email alerting on ERROR+ (opt-in; no-op unless configured). Imported lazily
+    # so a logging setup never hard-depends on the alerting module.
+    from app.core.alerting import build_email_alert_handler
+
+    alert_handler = build_email_alert_handler()
+    if alert_handler is not None:
+        alert_handler.setFormatter(formatter)
+        root.addHandler(alert_handler)
+        logging.getLogger(__name__).info("email_alerting_enabled")
 
     # Tame noisy loggers
     logging.getLogger("uvicorn.access").setLevel(logging.WARNING)

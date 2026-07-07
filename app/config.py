@@ -127,6 +127,23 @@ class Settings(BaseSettings):
     LOG_LEVEL: str = "INFO"
     LOG_FORMAT: str = "json"                       # json | text
 
+    # ── Error alerting (email on ERROR-level logs) ───────────────────────────
+    # Off by default. When enabled + SMTP configured, any ERROR log (e.g. Sofia
+    # failing for a patient) emails the team. Sending happens in a background
+    # thread (never blocks the event loop) and identical alerts are throttled to
+    # at most once per ALERT_MIN_INTERVAL_SECONDS so a flapping error can't storm
+    # the inbox.
+    ALERT_EMAIL_ENABLED: bool = False
+    ALERT_SMTP_HOST: Optional[str] = None
+    ALERT_SMTP_PORT: int = 587
+    ALERT_SMTP_USER: Optional[str] = None
+    ALERT_SMTP_PASSWORD: Optional[str] = None
+    ALERT_SMTP_USE_TLS: bool = True                # STARTTLS on port 587
+    ALERT_SMTP_USE_SSL: bool = False               # implicit SSL on port 465
+    ALERT_EMAIL_FROM: Optional[str] = None
+    ALERT_EMAIL_TO: Optional[str] = None           # comma-separated recipients
+    ALERT_MIN_INTERVAL_SECONDS: int = 300          # throttle identical alerts
+
     # ── Pagination defaults ──────────────────────────────────────────────────
     DEFAULT_PAGE_LIMIT: int = 50
     MAX_PAGE_LIMIT: int = 200
