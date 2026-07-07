@@ -32,6 +32,7 @@ tenant.ai_config shape:
 
 import logging
 import uuid
+from datetime import datetime, timedelta, timezone
 
 from google import genai
 from google.genai import types
@@ -42,7 +43,7 @@ from app.models.contact import Contact
 from app.models.message import Message, MessageDirection
 from app.models.tenant import Tenant
 from app.services import ai_stages
-from app.services.ai_tools import CLINIC_TOOLS, execute_tool
+from app.services.ai_tools import CLINIC_TOOLS, execute_tool, _clinic_tz, _fmt_local
 
 logger = logging.getLogger(__name__)
 
@@ -98,6 +99,23 @@ ou a conversa é de outro dia. NUNCA repita, reafirme ou "confirme de novo" um a
 citado no histórico sem conferir que ele ainda aparece no CONTEXTO ATUAL desta mensagem. Na \
 dúvida, chame get_upcoming_appointments antes de falar qualquer coisa sobre um agendamento — \
 nunca invente ou presuma que algo foi confirmado.
+- ATENÇÃO ao tempo das mensagens do histórico: algumas mensagens antigas vêm com um marcador \
+"[dia da semana dd/mm/aaaa hh:mm]" no início. Isso indica QUANDO aquela mensagem foi enviada. \
+Se esse marcador mostrar uma data de dias atrás, aquela parte da conversa é ANTIGA — o assunto \
+pode já ter se resolvido ou expirado (um agendamento que passou, um pedido de outra pessoa, uma \
+dúvida já respondida). Não retome um assunto velho como se tivesse acabado de acontecer; trate a \
+mensagem ATUAL do paciente (sem marcador, é a mais recente) como o foco. Use o histórico antigo \
+só como memória de fundo, comparando sempre com o CONTEXTO ATUAL.
+- Não abra a conversa recitando o agendamento do paciente sem que ele pergunte. Quando ele \
+mandar só um "oi/olá", responda como uma pessoa (cumprimente e pergunte como pode ajudar) — só \
+mencione um agendamento existente se ele perguntar, se for lembrete de um agendamento nas \
+próximas horas, ou se for realmente relevante para o que ele disse.
+- Se a mensagem atual for só uma saudação ("oi", "olá", "bom dia") e o histórico recente estiver \
+marcado como de dias atrás, comece uma interação NOVA: cumprimente e pergunte como pode ajudar \
+hoje. Não ressuscite sozinha um assunto antigo inacabado (uma vaga que ele perguntou semana \
+passada, uma dúvida de dias atrás) como se ele estivesse retomando aquilo — espere ele dizer o \
+que quer agora. Só emende no assunto anterior se a mensagem atual dele deixar claro que é a \
+continuação.
 - Se o paciente fizer mais de uma pergunta na mesma mensagem (ou em mensagens seguidas do \
 mesmo assunto), responda TODAS antes de seguir para outro tópico — nunca deixe uma pergunta \
 sem resposta só porque outra parecia mais relevante.
@@ -343,13 +361,47 @@ async def generate_reply(
     # Build conversation history. Past media turns are represented as a short
     # text marker (e.g. "[áudio enviado]") because we don't re-send the bytes
     # for old turns — only the current turn carries inline media.
-    contents: list[types.Content] = []
+    #
+    # The raw history carries NO time information, so the model cannot tell a
+    # message from 5 minutes ago from one 5 days ago — which made Sofia treat an
+    # old appointment/thread as if it were still live. We inject a compact time
+    # marker onto the first history message and onto any message that opens a new
+    # day or resumes after a long gap, so the model can see when the conversation
+    # jumped in time. Same-session messages stay clean (no marker).
+    tz = _clinic_tz(tenant.settings or {})
+    now_local = datetime.now(timezone.utc).astimezone(tz)
+    _GAP = timedelta(hours=4)
+
+    # Pre-collect usable messages with their local timestamps so we can look at
+    # both the previous AND the next message to bracket each "stale block".
+    usable: list[tuple[Message, str, datetime | None]] = []
     for msg in history:
         text_repr = _history_text_for(msg)
         if not text_repr:
             # Skip messages with no usable text — Part(text=None/"") is rejected
             # by the Gemini API with INVALID_ARGUMENT.
             continue
+        created = getattr(msg, "created_at", None)
+        local = created.astimezone(tz) if created is not None else None
+        usable.append((msg, text_repr, local))
+
+    contents: list[types.Content] = []
+    for i, (msg, text_repr, local) in enumerate(usable):
+        if local is not None:
+            prev_local = usable[i - 1][2] if i > 0 else None
+            # For the last history message, the "next" event is the current turn (now).
+            next_local = usable[i + 1][2] if i + 1 < len(usable) else now_local
+            # A message is marked when it OPENS a stale block (first old message, a
+            # new day, or a long silence before it) or CLOSES one (a long silence
+            # after it — e.g. the last thing said days before the patient returns).
+            opens = (
+                (prev_local is None and local.date() != now_local.date())
+                or (prev_local is not None and (local.date() != prev_local.date() or (local - prev_local) >= _GAP))
+            )
+            closes = next_local is not None and (next_local - local) >= _GAP
+            if opens or closes:
+                text_repr = f"[{_fmt_local(local, tz)}] {text_repr}"
+
         role = "user" if msg.direction == MessageDirection.INBOUND else "model"
         contents.append(types.Content(role=role, parts=[types.Part(text=text_repr)]))
 

@@ -369,14 +369,23 @@ async def execute_tool(
 _DEFAULT_SLOT_MINUTES = 60
 
 
+# This is a Brazil-only clinic SaaS. Defaulting an unconfigured clinic to UTC
+# made every date roll over to "tomorrow" after 21h local — e.g. at 23:32 in
+# Brazil the AI announced the next calendar day. America/Sao_Paulo (UTC-3, no
+# DST) is correct for essentially all populated Brazil and is a far safer
+# default than UTC. Tenants in another zone still override via settings.
+_DEFAULT_TZ = "America/Sao_Paulo"
+
+
 def _clinic_tz(tenant_settings: dict) -> ZoneInfo:
-    """Resolve the clinic timezone, falling back to UTC on invalid/missing config."""
-    tz_name = ((tenant_settings or {}).get("schedule", {}) or {}).get("timezone", "UTC")
+    """Resolve the clinic timezone, falling back to America/Sao_Paulo on
+    invalid/missing config (see _DEFAULT_TZ)."""
+    tz_name = ((tenant_settings or {}).get("schedule", {}) or {}).get("timezone") or _DEFAULT_TZ
     try:
         return ZoneInfo(tz_name)
     except ZoneInfoNotFoundError:
-        logger.warning("Invalid timezone '%s' — falling back to UTC", tz_name)
-        return ZoneInfo("UTC")
+        logger.warning("Invalid timezone '%s' — falling back to %s", tz_name, _DEFAULT_TZ)
+        return ZoneInfo(_DEFAULT_TZ)
 
 
 # Portuguese weekday names (Mon=0 … Sun=6) — strftime locale is unreliable on Windows.
@@ -996,7 +1005,7 @@ async def _get_clinic_info(tenant_settings: dict, tenant_name: str | None = None
         "payment_methods": clinic.get("payment_methods", []),
         "additional_info": clinic.get("additional_info"),
         "schedule": {
-            "timezone": schedule.get("timezone", "UTC"),
+            "timezone": schedule.get("timezone") or _DEFAULT_TZ,
             "working_days": working_days,
             "working_days_names": [_WEEKDAY_NAME_PT.get(d, str(d)) for d in working_days],
             "open_time": schedule.get("open_time", "08:00"),
