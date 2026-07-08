@@ -94,17 +94,32 @@ Legenda: ✅ feito no código · 🔴 bloqueador · 🟡 recomendado · ⏳ só 
 
 ## 🟢 Bom ter (pode esperar o pós-lançamento)
 
-> Os 3 itens de código abaixo têm **plano de implementação detalhado** em
-> [`PLANO_IMPLEMENTACAO.md`](PLANO_IMPLEMENTACAO.md), pronto para execução.
+Os 3 itens do [`PLANO_IMPLEMENTACAO.md`](PLANO_IMPLEMENTACAO.md) foram **implementados**:
 
-- [ ] **Handoff humano** (Item 1 do plano) — a Sofia reconhecer quando não sabe/não pode
-  resolver e pausar a si mesma (`request_human_handoff`; o flag `ai_paused` e a UI do
-  Inbox já existem).
-- [ ] **Testes automatizados** (Item 2 do plano) — suíte pytest para a lógica crítica.
-- [ ] **Página "Pacientes" dedicada** (Item 3 do plano) — rota própria com busca/filtros.
+- [x] **Handoff humano** (Item 1) — tool `request_human_handoff` pausa a Sofia (`ai_paused`,
+  unidirecional) quando o paciente pede humano, está irritado ou relata urgência.
+- [x] **Testes automatizados** (Item 2) — suíte pytest (`tests/`, `pytest.ini`,
+  `requirements-dev.txt`): 51 testes puros (sem DB, sem Gemini). `venv\Scripts\python -m pytest tests/ -q`.
+- [x] **Página "Pacientes" dedicada** (Item 3) — `/dashboard/patients` com busca, filtro por
+  estágio, badge de Sofia pausada e edição; deep-link `?contact=<id>` para o Inbox.
 - [ ] **Confirmar presença "digitando" com log real** em produção.
 - [ ] **Termos de uso / contrato de adesão** para as clínicas clientes.
 - [ ] **Teste de carga** com múltiplos tenants simultâneos.
+
+## ✅ Correções desta rodada (a partir de conversa real)
+
+- [x] **Sofia se revelou como IA** — regra absoluta no prompt: ela é uma pessoa para o paciente,
+  nunca diz/insinua que é IA/robô; removido "virtual" das identidades internas.
+- [x] **Sofia inventou que a consulta é "de graça"** — nova política estruturada de avaliação
+  na aba Clínica (gratuita / com custo / abate no procedimento). Sem configurar, ela não afirma
+  nem grátis nem pago.
+- [x] **Áudio não entendido** — quando o paciente mandava 2 áudios seguidos, só o último ia para
+  a IA. Agora todas as mídias da rajada são enviadas juntas.
+- [x] **Logs visuais** — formatter de texto legível (ícones + rótulos pt-BR); `LOG_FORMAT=text`
+  virou o padrão (console do EasyPanel fica legível sem configurar nada).
+
+> ⚠️ Tudo isso exige **novo redeploy** do backend + frontend para valer em produção.
+> E preencher, na aba Clínica: parcelamento máximo e a política de avaliação.
 
 ---
 

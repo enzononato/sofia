@@ -25,6 +25,10 @@ venv\Scripts\alembic downgrade -1
 # Check imports / syntax
 venv\Scripts\python -c "import app.main; print('OK')"
 
+# Run the unit test suite (pure/in-memory — no DB, no Gemini)
+venv\Scripts\python -m pytest tests/ -q
+venv\Scripts\python -m pytest tests/test_crm.py -q   # single file
+
 # Enable multimodal for a tenant
 venv\Scripts\python -m scripts.enable_multimodal <slug>
 ```
@@ -68,7 +72,9 @@ Migrations are linear (Alembic). Current head: `c3d4e5f6a7b8`. When adding a new
 - `GoogleCalendarCredential` — encrypted refresh token per professional
 
 ### AI (Sofia)
-Entry point: `app/services/ai.py` → `generate_reply()`. Context building: `app/services/ai_stages.py` → `build_context_block()` (injects current datetime in clinic TZ, CRM stage, upcoming appointments). Tools: `app/services/ai_tools.py` (9 tools declared as `FunctionDeclaration`; executors in the same file; `execute_tool()` dispatches).
+Entry point: `app/services/ai.py` → `generate_reply()`. Context building: `app/services/ai_stages.py` → `build_context_block()` (injects current datetime in clinic TZ, CRM stage, upcoming appointments). Tools: `app/services/ai_tools.py` (declared as `FunctionDeclaration`; executors in the same file; `execute_tool()` dispatches). Includes `request_human_handoff`, which sets `contact.ai_paused=True` (one-way — only staff un-pause via the Inbox) when the patient asks for a human, is upset, or reports urgency.
+
+**Sofia is a person to the patient — never an AI.** The prompt forbids revealing she's an AI/bot/virtual assistant; if asked, she deflects without confirming or denying. `generate_reply` accepts a list of media so a burst of several audios/images is all forwarded to Gemini (not just the last). Clinic settings expose structured `max_installments` and evaluation policy (`evaluation_fee_mode`/`evaluation_fee`/`evaluation_fee_deductible`) via `get_clinic_info` so Sofia never invents payment or consultation prices.
 
 **Security invariant**: `tenant_id` and `contact_id` are **never** taken from AI tool arguments — always injected from Python context. The AI cannot forge these values.
 
