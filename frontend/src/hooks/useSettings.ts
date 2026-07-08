@@ -24,6 +24,10 @@ export interface TenantSettings {
     payment_methods?: string[];
     /** Max credit-card installments Sofia may quote. Unset = arranged at the clinic. */
     max_installments?: number;
+    /** Evaluation/consultation pricing policy. Unset = Sofia won't claim free or paid. */
+    evaluation_fee_mode?: "free" | "paid";
+    evaluation_fee?: number;
+    evaluation_fee_deductible?: boolean;
     additional_info?: string;
   };
   followups?: {

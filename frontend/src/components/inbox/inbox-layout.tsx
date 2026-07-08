@@ -1,14 +1,25 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
+import { useSearchParams } from "next/navigation";
 import { ContactList } from "./contact-list";
 import { ChatWindow } from "./chat-window";
 import { useContacts } from "@/hooks/useInbox";
 import { Sparkles } from "lucide-react";
 
 export function InboxLayout() {
+  const searchParams = useSearchParams();
   const [selectedContactId, setSelectedContactId] = useState<string | null>(null);
   const { data: contacts, isLoading, error } = useContacts();
+
+  // Deep-link support: /dashboard/inbox?contact=<id> (e.g. from the Patients
+  // page) opens straight into that conversation once the list has loaded.
+  useEffect(() => {
+    const contactParam = searchParams.get("contact");
+    if (contactParam && contacts?.some((c) => c.id === contactParam)) {
+      setSelectedContactId(contactParam);
+    }
+  }, [searchParams, contacts]);
 
   return (
     <div className="flex h-[calc(100vh-64px)] w-full overflow-hidden bg-background">

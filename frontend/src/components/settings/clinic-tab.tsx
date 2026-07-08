@@ -10,7 +10,8 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Textarea } from "@/components/ui/textarea";
 import { Badge } from "@/components/ui/badge";
-import { MapPin, Phone, Mail, Globe, CreditCard, Info, Save, Loader2, Plus, X, CloudUpload, Edit, CheckCircle2, Sparkles, ArrowRight } from "lucide-react";
+import { MapPin, Phone, Mail, Globe, CreditCard, Info, Save, Loader2, Plus, X, CloudUpload, Edit, CheckCircle2, Sparkles, ArrowRight, Stethoscope } from "lucide-react";
+import { cn } from "@/lib/utils";
 
 const formSchema = z.object({
   address: z.string().optional(),
@@ -45,6 +46,22 @@ export function ClinicTab({ tenant }: { tenant: TenantProfile }) {
   // installment plan is arranged at the clinic instead of inventing a number.
   const [maxInstallments, setMaxInstallments] = useState<string>(
     defaultSettings.max_installments ? String(defaultSettings.max_installments) : ""
+  );
+  // Evaluation/consultation pricing policy. "unset" = Sofia won't claim it's
+  // free or paid; "free" = says it's free; "paid" = quotes the fee (and whether
+  // it's deducted from the procedure if the patient closes the treatment).
+  const [evalMode, setEvalMode] = useState<"unset" | "free" | "paid">(
+    defaultSettings.evaluation_fee_mode === "free"
+      ? "free"
+      : defaultSettings.evaluation_fee_mode === "paid"
+      ? "paid"
+      : "unset"
+  );
+  const [evalFee, setEvalFee] = useState<string>(
+    defaultSettings.evaluation_fee ? String(defaultSettings.evaluation_fee) : ""
+  );
+  const [evalDeductible, setEvalDeductible] = useState<boolean>(
+    defaultSettings.evaluation_fee_deductible ?? false
   );
 
   const { register, handleSubmit, formState: { errors } } = useForm<FormValues>({
@@ -87,6 +104,13 @@ export function ClinicTab({ tenant }: { tenant: TenantProfile }) {
             maxInstallments && Number(maxInstallments) >= 2
               ? Math.min(24, Math.floor(Number(maxInstallments)))
               : undefined,
+          evaluation_fee_mode: evalMode === "unset" ? undefined : evalMode,
+          evaluation_fee:
+            evalMode === "paid" && evalFee && Number(evalFee) > 0
+              ? Number(evalFee)
+              : undefined,
+          evaluation_fee_deductible:
+            evalMode === "paid" ? evalDeductible : undefined,
         }
       };
 
@@ -288,6 +312,74 @@ export function ClinicTab({ tenant }: { tenant: TenantProfile }) {
                   </div>
                   <p className="text-[11px] text-muted-foreground/70 font-sans mt-2 leading-relaxed">
                     A Sofia só informa parcelamento aos pacientes se este número estiver preenchido — ela nunca inventa condições de pagamento.
+                  </p>
+                </div>
+
+                {/* Evaluation/consultation policy — structured so Sofia never invents "é de graça" */}
+                <div className="mt-4 rounded-2xl border border-white/10 bg-white/[0.03] p-4">
+                  <Label className="font-mono text-[10px] uppercase tracking-wider text-muted-foreground/80 flex items-center gap-2">
+                    <Stethoscope className="h-3.5 w-3.5 text-muted-foreground/60" />
+                    Avaliação / Consulta inicial
+                  </Label>
+                  <div className="mt-3 flex flex-wrap gap-2">
+                    {([
+                      { id: "unset", label: "Não informar" },
+                      { id: "free", label: "Gratuita" },
+                      { id: "paid", label: "Tem custo" },
+                    ] as const).map((opt) => (
+                      <button
+                        key={opt.id}
+                        type="button"
+                        onClick={() => setEvalMode(opt.id)}
+                        className={cn(
+                          "text-xs rounded-xl px-4 py-2 font-semibold transition-all cursor-pointer border",
+                          evalMode === opt.id
+                            ? "bg-primary/15 text-primary border-primary/30"
+                            : "border-white/10 bg-white/5 text-muted-foreground hover:text-foreground hover:bg-white/10"
+                        )}
+                      >
+                        {opt.label}
+                      </button>
+                    ))}
+                  </div>
+
+                  {evalMode === "paid" && (
+                    <div className="mt-3 space-y-3">
+                      <div className="flex items-center gap-3">
+                        <div className="relative">
+                          <span className="absolute left-3.5 top-1/2 -translate-y-1/2 text-sm text-muted-foreground/60">R$</span>
+                          <Input
+                            type="number"
+                            min={0}
+                            step="0.01"
+                            value={evalFee}
+                            onChange={(e) => setEvalFee(e.target.value)}
+                            placeholder="Ex: 100,00"
+                            className="h-12 w-40 rounded-xl border-white/10 bg-background/55 text-foreground pl-10 pr-4 text-sm focus-visible:ring-1 focus-visible:ring-primary/50 focus:border-primary/50 transition-all"
+                          />
+                        </div>
+                        <span className="text-xs text-muted-foreground font-sans">valor da avaliação</span>
+                      </div>
+                      <label className="flex items-center gap-3 cursor-pointer">
+                        <input
+                          type="checkbox"
+                          checked={evalDeductible}
+                          onChange={(e) => setEvalDeductible(e.target.checked)}
+                          className="h-4 w-4 rounded border-white/20 bg-background/55 accent-primary cursor-pointer"
+                        />
+                        <span className="text-xs text-muted-foreground font-sans">
+                          Esse valor é <strong className="text-foreground">abatido do procedimento</strong> se o paciente fechar o tratamento
+                        </span>
+                      </label>
+                    </div>
+                  )}
+
+                  <p className="text-[11px] text-muted-foreground/70 font-sans mt-3 leading-relaxed">
+                    {evalMode === "unset"
+                      ? "Com \"Não informar\", a Sofia nunca dirá que a avaliação é gratuita nem que tem custo — ela oferece agendar e diz que o valor é confirmado na clínica."
+                      : evalMode === "free"
+                      ? "A Sofia poderá informar que a avaliação é gratuita."
+                      : "A Sofia informará o valor da avaliação exatamente como configurado aqui."}
                   </p>
                 </div>
               </div>

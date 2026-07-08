@@ -9,6 +9,7 @@ import {
   Calendar,
   Stethoscope,
   Users,
+  UserRound,
   Settings,
   Sparkles,
   KanbanSquare,
@@ -20,6 +21,7 @@ import {
 const navigation = [
   { name: "Inbox", href: "/dashboard/inbox", icon: MessageCircle },
   { name: "CRM", href: "/dashboard/crm", icon: KanbanSquare },
+  { name: "Pacientes", href: "/dashboard/patients", icon: UserRound },
   { name: "Calendário", href: "/dashboard/calendar", icon: Calendar },
   { name: "Relatórios", href: "/dashboard/reports", icon: BarChart3, adminOnly: true },
   { name: "Serviços", href: "/dashboard/services", icon: Stethoscope, adminOnly: true },
