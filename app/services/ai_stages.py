@@ -37,7 +37,7 @@ class Stage(str, Enum):
 DEFAULT_STAGE_OVERLAYS: dict[Stage, str] = {
     Stage.FIRST_CONTACT: (
         "Esta é a PRIMEIRA conversa deste paciente com a clínica.\n"
-        "- Apresente-se brevemente como Sofia, a secretária virtual.\n"
+        "- Apresente-se brevemente como Sofia, a secretária da clínica (uma pessoa, nunca uma IA).\n"
         "- Pergunte como pode ajudar de forma acolhedora.\n"
         "- Se o paciente já mandou uma dúvida concreta, vá direto resolvendo — "
         "não obrigue a passar por uma apresentação se ele já está pedindo algo."

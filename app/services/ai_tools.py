@@ -274,6 +274,31 @@ _set_crm_stage_decl = types.FunctionDeclaration(
     ),
 )
 
+_request_human_handoff_decl = types.FunctionDeclaration(
+    name="request_human_handoff",
+    description=(
+        "Transfere o atendimento deste paciente para um humano da equipe e pausa você (Sofia) "
+        "nesta conversa até a equipe reativar manualmente. Chame esta ferramenta quando: o "
+        "paciente pedir explicitamente para falar com um humano, um atendente, o dono ou uma "
+        "'pessoa de verdade'; ele estiver claramente irritado ou insatisfeito; relatar dor forte, "
+        "complicação pós-procedimento ou qualquer urgência clínica; pedir algo fora do que você "
+        "pode resolver sozinha (negociação de desconto além do que os dados permitem, exceção de "
+        "política, reclamação séria); ou depois de 2 ou mais tentativas sem conseguir resolver a "
+        "mesma coisa. Esta ferramenta SÓ pausa o atendimento automático — não existe forma de "
+        "reativá-lo por aqui, isso é feito manualmente pela equipe."
+    ),
+    parameters=types.Schema(
+        type=types.Type.OBJECT,
+        properties={
+            "reason": types.Schema(
+                type=types.Type.STRING,
+                description="Motivo curto da transferência (ex: 'pediu para falar com atendente humano').",
+            ),
+        },
+        required=["reason"],
+    ),
+)
+
 # Single Tool object bundling all declarations
 CLINIC_TOOLS = types.Tool(
     function_declarations=[
@@ -287,6 +312,7 @@ CLINIC_TOOLS = types.Tool(
         _update_contact_info_decl,
         _list_professionals_decl,
         _set_crm_stage_decl,
+        _request_human_handoff_decl,
     ]
 )
 
@@ -358,6 +384,9 @@ async def execute_tool(
 
     if name == "set_crm_stage":
         return await _set_crm_stage(db, tenant_id, contact_id, args)
+
+    if name == "request_human_handoff":
+        return await _request_human_handoff(db, tenant_id, contact_id, args)
 
     return {"error": f"Unknown tool: {name}"}
 
@@ -558,6 +587,15 @@ async def _lock_tenant(db: AsyncSession, tenant_id: uuid.UUID) -> None:
 # Handlers
 # ---------------------------------------------------------------------------
 
+def _normalize_service_price(price) -> str | None:
+    # A price of 0 (or negative) means the clinic never filled it in — it is
+    # NOT "free". Report it as unset so Sofia says the value is assessed in
+    # the consultation instead of announcing "R$ 0,00".
+    if price is None or price <= 0:
+        return None
+    return str(price)
+
+
 async def _list_services(
     db: AsyncSession, tenant_id: uuid.UUID, per_professional: bool = False
 ) -> dict:
@@ -576,22 +614,14 @@ async def _list_services(
         query = query.where(Service.id.in_(linked))
     services = (await db.execute(query.order_by(Service.name))).scalars().all()
 
-    def _price(s: Service) -> str | None:
-        # A price of 0 (or negative) means the clinic never filled it in — it is
-        # NOT "free". Report it as unset so Sofia says the value is assessed in
-        # the consultation instead of announcing "R$ 0,00".
-        if s.price is None or s.price <= 0:
-            return None
-        return str(s.price)
-
     return {
         "services": [
             {
                 "id": str(s.id),
                 "name": s.name,
                 "duration_minutes": s.duration_minutes,
-                "price": _price(s),
-                "price_unset": _price(s) is None,
+                "price": _normalize_service_price(s.price),
+                "price_unset": _normalize_service_price(s.price) is None,
                 "description": s.description,
             }
             for s in services
@@ -996,6 +1026,49 @@ _WEEKDAY_NAME_PT = {
 }
 
 
+def _evaluation_policy_info(clinic: dict) -> str:
+    """
+    Human-readable policy for the paid/free evaluation (avaliação/consulta), built
+    from structured clinic settings so Sofia never invents whether it's free.
+
+    settings.clinic keys (all optional):
+      - evaluation_fee_mode: "free" | "paid"   (absent/other = not configured)
+      - evaluation_fee: number                 (only when "paid")
+      - evaluation_fee_deductible: bool        (only when "paid": value is
+                                                discounted from the procedure if
+                                                the patient closes the treatment)
+    """
+    mode = (clinic.get("evaluation_fee_mode") or "").strip().lower()
+
+    if mode == "free":
+        return "A avaliação/consulta é GRATUITA (sem custo)."
+
+    if mode == "paid":
+        raw_fee = clinic.get("evaluation_fee")
+        try:
+            fee = float(raw_fee) if raw_fee not in (None, "") else None
+            if fee is not None and fee <= 0:
+                fee = None
+        except (TypeError, ValueError):
+            fee = None
+        fee_txt = (
+            f"R$ {fee:.2f}".replace(".", ",") if fee is not None else "um valor definido na clínica"
+        )
+        if clinic.get("evaluation_fee_deductible"):
+            return (
+                f"A avaliação/consulta custa {fee_txt}, e esse valor é ABATIDO do procedimento "
+                "caso o paciente feche o tratamento."
+            )
+        return f"A avaliação/consulta custa {fee_txt}."
+
+    # Not configured: Sofia must NOT claim it is free nor paid.
+    return (
+        "Política de avaliação/consulta NÃO configurada — NÃO afirme que a avaliação é gratuita "
+        "nem que tem custo. Pode oferecer agendar a avaliação, mas diga que os detalhes de valor "
+        "são confirmados na clínica."
+    )
+
+
 async def _get_clinic_info(tenant_settings: dict, tenant_name: str | None = None) -> dict:
     """
     Return the clinic-info block from tenant.settings.clinic plus the schedule
@@ -1030,6 +1103,7 @@ async def _get_clinic_info(tenant_settings: dict, tenant_name: str | None = None
             if max_installments
             else "Parcelamento não configurado — a quantidade de parcelas é combinada na clínica; NÃO invente um número."
         ),
+        "evaluation_info": _evaluation_policy_info(clinic),
         "additional_info": clinic.get("additional_info"),
         "schedule": {
             "timezone": schedule.get("timezone") or _DEFAULT_TZ,
@@ -1163,6 +1237,44 @@ async def _set_crm_stage(
         contact_id, tenant_id, stage, args.get("reason"),
     )
     return {"success": True, "crm_stage": stage}
+
+
+async def _request_human_handoff(
+    db: AsyncSession,
+    tenant_id: uuid.UUID,
+    contact_id: uuid.UUID,
+    args: dict,
+) -> dict:
+    """Pause Sofia on this contact and hand the conversation off to the human
+    team. tenant_id/contact_id come from context — never from args. This is a
+    one-way switch: the AI has no matching "resume" tool, only the team can
+    un-pause via the existing Inbox UI (PATCH /contacts/{id})."""
+    contact = (
+        await db.execute(
+            select(Contact).where(Contact.id == contact_id, Contact.tenant_id == tenant_id)
+        )
+    ).scalar_one_or_none()
+    if contact is None:
+        return {"error": "Contato não encontrado."}
+
+    contact.ai_paused = True
+    await db.flush()
+
+    logger.warning(
+        "human_handoff_requested",
+        extra={
+            "tenant_id": str(tenant_id),
+            "contact_id": str(contact_id),
+            "reason": args.get("reason"),
+        },
+    )
+    return {
+        "success": True,
+        "message": (
+            "Atendimento transferido para a equipe. Envie UMA mensagem curta e acolhedora "
+            "avisando que alguém da equipe já vai continuar por ali — não tente resolver de novo."
+        ),
+    }
 
 
 # ---------------------------------------------------------------------------

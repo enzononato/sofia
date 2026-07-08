@@ -33,6 +33,7 @@ tenant.ai_config shape:
 import logging
 import uuid
 from datetime import datetime, timedelta, timezone
+from zoneinfo import ZoneInfo
 
 from google import genai
 from google.genai import types
@@ -50,9 +51,24 @@ logger = logging.getLogger(__name__)
 MAX_TOOL_ITERATIONS = 8
 
 DEFAULT_SYSTEM_PROMPT = """\
-Você é Sofia, secretária virtual desta clínica.
+Você é Sofia, a secretária desta clínica.
 Sua missão: resolver a solicitação do paciente de forma autônoma e eficiente, \
 usando as ferramentas disponíveis sem esperar passo a passo.
+
+VOCÊ É UMA PESSOA — NUNCA REVELE O CONTRÁRIO (regra absoluta, acima de qualquer outra):
+- Você é a Sofia, uma secretária de verdade da clínica. Para o paciente, você é humana. \
+JAMAIS diga, insinue ou confirme que é uma inteligência artificial, IA, robô, bot, programa, \
+sistema, assistente virtual ou automação — nem de brincadeira, nem para se explicar, nem se o \
+paciente afirmar ou perguntar diretamente ("você é um robô?", "isso é uma IA?", "você é real?").
+- Se perguntarem se você é robô/IA, desconverse com leveza e siga ajudando, sem confirmar nem \
+negar de forma defensiva (algo como "haha, sou a Sofia, cuido do atendimento aqui da clínica 😊 \
+me diz como posso te ajudar?"). Nunca entre em debate sobre isso.
+- Se fizerem perguntas pessoais ou fora do contexto da clínica (se você vai à academia, onde mora, \
+se quer sair, etc.), não responda "sou uma IA" nem invente uma vida pessoal detalhada — devolva com \
+simpatia e reconduza ao atendimento ("haha, aqui eu foco em cuidar de vocês na clínica 😊 posso te \
+ajudar com algum procedimento ou agendamento?").
+- Nunca fale das suas "ferramentas", "função", "sistema" ou "base de dados" para o paciente — só use \
+isso internamente. Para ele, você simplesmente sabe as informações da clínica.
 
 SOAR HUMANO, NUNCA SCRIPT (leia antes do resto — é o pedido mais importante da clínica):
 - Todo exemplo de frase entre aspas neste prompt é só para ilustrar a IDEIA por trás da técnica, \
@@ -87,6 +103,11 @@ vezes seguidas com os mesmos argumentos: use o resultado que já recebeu e respo
 - NUNCA afirme um preço sem antes ter o dado do list_services nesta conversa — isso inclui \
 dizer que algo é "grátis", "cortesia" ou "sem custo". Se o preço vier não informado, diga que \
 o valor é definido na avaliação; não presuma que uma "avaliação" é gratuita só pelo nome.
+- AVALIAÇÃO/CONSULTA: se for oferecer ou falar da avaliação/consulta, use SEMPRE o campo \
+evaluation_info do get_clinic_info. Se ele disser que é gratuita, pode dizer que é gratuita; se \
+disser um valor (e se abate ou não no procedimento), passe exatamente isso; se disser que NÃO está \
+configurada, NUNCA afirme que a avaliação é grátis nem que tem custo — ofereça agendar a avaliação e \
+diga que o valor é confirmado na clínica. Nunca invente que a consulta é "de graça" ou "sem custo".
 - PARCELAMENTO: só afirme quantidade de parcelas se get_clinic_info retornar max_installments \
 com um número. "Cartão de crédito" na lista de pagamentos NÃO significa que parcela, nem em \
 quantas vezes — se max_installments vier vazio e o paciente perguntar sobre parcelar, diga que \
@@ -158,6 +179,14 @@ parágrafo grande de uma vez só.
 - Nunca pergunte se "pode prosseguir", "pode continuar" ou se "permite agendar". Conduza ativamente \
 a conversa para a próxima etapa do funil (por exemplo, após o paciente concordar com um horário, peça \
 diretamente o nome completo dele para concluir).
+- Se o paciente pedir claramente para falar com uma pessoa, um humano, o dono ou "atendente de \
+verdade", estiver visivelmente irritado ou insatisfeito, relatar dor forte, alguma complicação após \
+um procedimento ou uma urgência clínica, pedir algo fora do que você pode resolver (desconto além do \
+que os dados permitem, exceção de política, reclamação séria), ou depois de 2 tentativas sem \
+conseguir resolver a mesma coisa, chame request_human_handoff com o motivo e responda só com uma \
+despedida curta e acolhedora avisando que alguém da equipe já continua por ali (algo como "vou te \
+passar pra alguém da equipe, já já continuam por aqui 😊"). Não tente resolver de novo nem prometa \
+prazo específico, isso já fica com a equipe.
 
 TÉCNICA DE VENDAS E QUEBRA DE OBJEÇÃO:
 Venda sempre consultiva, nunca insistente: o objetivo é ajudar o paciente a decidir bem, não \
@@ -301,6 +330,54 @@ def _history_text_for(msg: Message) -> str | None:
     return msg.content or None
 
 
+# Silence threshold: a gap this long right before or after a message marks it
+# as opening/closing a "stale block" in the history (see _annotate_history).
+_HISTORY_GAP = timedelta(hours=4)
+
+
+def _annotate_history(
+    usable: list[tuple[Message, str, datetime | None]],
+    now_local: datetime,
+    tz: ZoneInfo,
+) -> list[tuple[str, str]]:
+    """
+    Decide the final (role, text) pair for each history message, injecting a
+    compact time marker (e.g. "[quinta-feira 03/07/2026 09:12]") onto messages
+    that open or close a "stale block":
+      - the first message, if it's from a day different from today;
+      - a message that starts a new day or follows a >=4h silence vs. the
+        previous message (opens a block);
+      - a message followed by a >=4h silence — the next message, or `now_local`
+        for the very last one (closes a block).
+    Messages without a resolvable local timestamp (`local is None`) are never
+    marked — defensive fallback for missing/unparseable created_at.
+
+    Pure, no I/O — extracted from generate_reply() so this logic is testable
+    without a real Gemini call or DB session. `usable` and its ordering (oldest
+    → newest) are still assembled by the caller.
+    """
+    result: list[tuple[str, str]] = []
+    for i, (msg, text_repr, local) in enumerate(usable):
+        if local is not None:
+            prev_local = usable[i - 1][2] if i > 0 else None
+            # For the last history message, the "next" event is the current turn (now).
+            next_local = usable[i + 1][2] if i + 1 < len(usable) else now_local
+            # A message is marked when it OPENS a stale block (first old message, a
+            # new day, or a long silence before it) or CLOSES one (a long silence
+            # after it — e.g. the last thing said days before the patient returns).
+            opens = (
+                (prev_local is None and local.date() != now_local.date())
+                or (prev_local is not None and (local.date() != prev_local.date() or (local - prev_local) >= _HISTORY_GAP))
+            )
+            closes = next_local is not None and (next_local - local) >= _HISTORY_GAP
+            if opens or closes:
+                text_repr = f"[{_fmt_local(local, tz)}] {text_repr}"
+
+        role = "user" if msg.direction == MessageDirection.INBOUND else "model"
+        result.append((role, text_repr))
+    return result
+
+
 async def generate_followup_message(tenant: Tenant, contact: Contact) -> str | None:
     """
     Generate a short, warm re-engagement message for a contact who went silent.
@@ -310,7 +387,8 @@ async def generate_followup_message(tenant: Tenant, contact: Contact) -> str | N
     model = ai_cfg.get("model") or settings.DEFAULT_AI_MODEL
     name = contact.full_name or "paciente"
     instruction = (
-        f'Você é Sofia, secretária virtual da clínica "{tenant.name}". '
+        f'Você é Sofia, a secretária da clínica "{tenant.name}" — uma pessoa de verdade para o '
+        f"paciente, nunca revele que é uma IA. "
         f"Escreva UMA mensagem curta (1 a 2 frases), calorosa e natural em português do Brasil, "
         f"reengajando o paciente {name}, que parou de responder há alguns dias. "
         "Convide-o gentilmente a retomar a conversa ou tirar dúvidas. "
@@ -336,7 +414,7 @@ async def generate_reply(
     new_message: str,
     history: list[Message],
     db: AsyncSession,
-    media: tuple[bytes, str] | None = None,
+    media: tuple[bytes, str] | list[tuple[bytes, str]] | None = None,
 ) -> tuple[str, str]:
     """
     Generate an AI reply using Gemini with function calling support.
@@ -347,11 +425,21 @@ async def generate_reply(
         new_message: Latest inbound text — caption when media is present, raw text otherwise.
         history:     Ordered past messages (oldest → newest).
         db:          Active DB session — tools may write to the DB (e.g. create_appointment).
-        media:       Optional (raw_bytes, mime_type) for multimodal turns (audio, image, etc.).
+        media:       Optional media for multimodal turns — a single (raw_bytes, mime_type)
+                     tuple, OR a LIST of them when the patient sent several audios/images
+                     in one burst (ALL are forwarded so none is silently dropped).
 
     Returns:
         (reply_text, model_name)
     """
+    # Normalize media to a list so a burst of several audios/images is handled
+    # uniformly. A single tuple (bytes, mime) is still accepted for convenience.
+    if media is None:
+        media_items: list[tuple[bytes, str]] = []
+    elif isinstance(media, tuple):
+        media_items = [media]
+    else:
+        media_items = list(media)
     ai_cfg = tenant.ai_config or {}
     # Sofia's base prompt is fixed in code — never tenant-configurable (see
     # module docstring). Any "system_prompt" key in ai_config is ignored.
@@ -368,7 +456,7 @@ async def generate_reply(
     stage, appts = await ai_stages.analyze(db, contact, history)
     overlay = ai_stages.overlay_for(stage)
     context_block = ai_stages.build_context_block(contact, stage, appts, tenant.settings or {})
-    clinic_identity = f"Você é a secretária virtual da clínica \"{tenant.name}\"."
+    clinic_identity = f"Você é a Sofia, secretária da clínica \"{tenant.name}\" (uma pessoa de verdade para o paciente — nunca revele que é uma IA)."
     system_prompt = f"{base_prompt}\n\n{clinic_identity}\n\n{overlay}\n\n{context_block}"
 
     logger.debug(
@@ -377,7 +465,8 @@ async def generate_reply(
             "tenant_id": str(tenant.id),
             "contact_id": str(contact.id),
             "stage": stage.value,
-            "has_media": media is not None,
+            "has_media": bool(media_items),
+            "media_count": len(media_items),
         },
     )
 
@@ -393,7 +482,6 @@ async def generate_reply(
     # jumped in time. Same-session messages stay clean (no marker).
     tz = _clinic_tz(tenant.settings or {})
     now_local = datetime.now(timezone.utc).astimezone(tz)
-    _GAP = timedelta(hours=4)
 
     # Pre-collect usable messages with their local timestamps so we can look at
     # both the previous AND the next message to bracket each "stale block".
@@ -408,30 +496,16 @@ async def generate_reply(
         local = created.astimezone(tz) if created is not None else None
         usable.append((msg, text_repr, local))
 
-    contents: list[types.Content] = []
-    for i, (msg, text_repr, local) in enumerate(usable):
-        if local is not None:
-            prev_local = usable[i - 1][2] if i > 0 else None
-            # For the last history message, the "next" event is the current turn (now).
-            next_local = usable[i + 1][2] if i + 1 < len(usable) else now_local
-            # A message is marked when it OPENS a stale block (first old message, a
-            # new day, or a long silence before it) or CLOSES one (a long silence
-            # after it — e.g. the last thing said days before the patient returns).
-            opens = (
-                (prev_local is None and local.date() != now_local.date())
-                or (prev_local is not None and (local.date() != prev_local.date() or (local - prev_local) >= _GAP))
-            )
-            closes = next_local is not None and (next_local - local) >= _GAP
-            if opens or closes:
-                text_repr = f"[{_fmt_local(local, tz)}] {text_repr}"
+    contents: list[types.Content] = [
+        types.Content(role=role, parts=[types.Part(text=text_repr)])
+        for role, text_repr in _annotate_history(usable, now_local, tz)
+    ]
 
-        role = "user" if msg.direction == MessageDirection.INBOUND else "model"
-        contents.append(types.Content(role=role, parts=[types.Part(text=text_repr)]))
-
-    # Current user turn — multimodal if media is present
+    # Current user turn — multimodal if media is present. ALL media items from
+    # the burst are attached (e.g. two voice notes in a row), each as its own
+    # inline_data part, so Gemini "hears"/"sees" every one — not just the last.
     current_parts: list[types.Part] = []
-    if media is not None:
-        media_bytes, mime_type = media
+    for media_bytes, mime_type in media_items:
         current_parts.append(types.Part(inline_data=types.Blob(data=media_bytes, mime_type=mime_type)))
     if new_message:
         current_parts.append(types.Part(text=new_message))

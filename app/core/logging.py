@@ -68,24 +68,115 @@ def _safe(value: Any) -> Any:
         return str(value)
 
 
+# ── Pretty (human) formatter ─────────────────────────────────────────────────
+# ANSI colors, applied only when writing to a real terminal (never in EasyPanel
+# container logs, which would otherwise show escape codes as garbage).
+_ANSI = {
+    "reset": "\033[0m", "dim": "\033[2m", "bold": "\033[1m",
+    "red": "\033[31m", "green": "\033[32m", "yellow": "\033[33m",
+    "blue": "\033[34m", "magenta": "\033[35m", "cyan": "\033[36m", "gray": "\033[90m",
+}
+
+# level → (icon, color)
+_LEVEL_STYLE = {
+    "DEBUG": ("·", "gray"),
+    "INFO": ("•", "cyan"),
+    "WARNING": ("▲", "yellow"),
+    "ERROR": ("✖", "red"),
+    "CRITICAL": ("🔥", "red"),
+}
+
+# Known event slugs (the log message) → (icon, friendly pt-BR label). Turns the
+# raw event stream into something a human can scan: what Sofia is actually doing.
+_EVENT_STYLE: dict[str, tuple[str, str]] = {
+    "webhook_received": ("📩", "mensagem recebida"),
+    "webhook_processed": ("✅", "Sofia respondeu"),
+    "webhook_group_skipped": ("🔇", "grupo ignorado"),
+    "webhook_nothing_to_answer": ("💤", "nada a responder"),
+    "webhook_ai_paused": ("⏸️", "Sofia pausada (atendimento humano)"),
+    "webhook_ai_paused_late": ("⏸️", "Sofia pausada (atendimento humano)"),
+    "human_handoff_requested": ("🙋", "TRANSFERIDO para humano"),
+    "gemini_reply_ready": ("🤖", "resposta gerada"),
+    "gemini_forced_final_reply": ("🤖", "resposta gerada (final)"),
+    "ai_tool_executed": ("🔧", "ferramenta usada"),
+    "gemini_empty_parts": ("⚠️", "modelo retornou vazio"),
+    "gemini_call_failed": ("💥", "falha na chamada ao modelo"),
+    "gemini_tool_loop_exhausted": ("🔁", "loop de ferramentas esgotado"),
+    "reply_superseded_by_new_message": ("↩️", "resposta adiada (chegou nova msg)"),
+    "webhook_media_download_giving_up": ("📎", "falha ao baixar mídia"),
+    "webhook_media_too_large": ("📎", "mídia grande demais"),
+    "scheduler_started": ("⏰", "agendador iniciado"),
+    "user_login": ("🔑", "login"),
+    "email_alerting_enabled": ("📧", "alertas de e-mail ativos"),
+    # Empty label: HTTP access lines render as just "METHOD /path → status".
+    "request_completed": ("🌐", ""),
+}
+
+# Extras shown first (curated, in this order) — the rest are appended dim. Noisy
+# identifiers are hidden entirely from the pretty view (still in JSON logs).
+_EXTRA_PRIORITY = ("phone", "contact_id", "tool", "stage", "reason", "model",
+                   "parts", "reply_length", "method", "path", "status", "elapsed_ms")
+_EXTRA_HIDDEN = {"request_id", "tenant_id", "taskName", "body_keys", "chatid",
+                 "tenant_slug", "result_keys", "iteration", "iterations"}
+
+
 class _DevFormatter(logging.Formatter):
-    """Human-readable formatter that includes extra={} fields as key=value pairs."""
+    """Human-scannable formatter: one clean line per event with an icon and a
+    friendly label, key details inline, noise dimmed. Colors only on a TTY."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self._color = hasattr(sys.stdout, "isatty") and sys.stdout.isatty()
+
+    def _c(self, text: str, color: str) -> str:
+        if not self._color or not text:
+            return text
+        return f"{_ANSI.get(color, '')}{text}{_ANSI['reset']}"
+
+    def _short(self, contact_id: str) -> str:
+        return contact_id.split("-")[0] if isinstance(contact_id, str) else str(contact_id)
 
     def format(self, record: logging.LogRecord) -> str:
-        ts = datetime.fromtimestamp(record.created).strftime("%Y-%m-%d %H:%M:%S")
-        base = f"{ts} [{record.levelname}] {record.name} — {record.getMessage()}"
+        ts = datetime.fromtimestamp(record.created).strftime("%H:%M:%S")
+        lvl_icon, lvl_color = _LEVEL_STYLE.get(record.levelname, ("•", "cyan"))
+
+        raw_msg = record.getMessage()
+        ev_icon, label = _EVENT_STYLE.get(raw_msg, ("", raw_msg))
+        headline = f"{ev_icon} {label}".strip()
+        if record.levelname in ("ERROR", "CRITICAL", "WARNING"):
+            headline = self._c(headline, lvl_color)
 
         extras = {
             k: v for k, v in record.__dict__.items()
-            if k not in _STD_ATTRS and not k.startswith("_")
+            if k not in _STD_ATTRS and not k.startswith("_") and k not in _EXTRA_HIDDEN
         }
-        if extras:
-            parts = " | ".join(f"{k}={v}" for k, v in extras.items())
-            base = f"{base}  [{parts}]"
+
+        # HTTP access line reads best as "METHOD /path → status (Nms)"
+        detail_bits: list[str] = []
+        if "method" in extras and "path" in extras:
+            status = extras.pop("status", "")
+            elapsed = extras.pop("elapsed_ms", None)
+            elapsed_txt = f" ({round(elapsed)}ms)" if isinstance(elapsed, (int, float)) else ""
+            detail_bits.append(
+                self._c(f"{extras.pop('method')} {extras.pop('path')} → {status}{elapsed_txt}", "gray")
+            )
+
+        if "contact_id" in extras:
+            extras["contact_id"] = self._short(extras["contact_id"])
+
+        for key in _EXTRA_PRIORITY:
+            if key in extras:
+                detail_bits.append(f"{self._c(key, 'dim')}={extras.pop(key)}")
+        for key, val in extras.items():
+            detail_bits.append(self._c(f"{key}={val}", "dim"))
+
+        line = f"{self._c(ts, 'gray')} {self._c(lvl_icon, lvl_color)} {headline}"
+        if detail_bits:
+            line += "  " + "  ".join(str(b) for b in detail_bits)
 
         if record.exc_info:
-            base += "\n" + self.formatException(record.exc_info)
-        return base
+            line += "\n" + self._c(self.formatException(record.exc_info), "red")
+        return line
 
 
 def configure_logging() -> None:

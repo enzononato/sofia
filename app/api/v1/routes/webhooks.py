@@ -576,7 +576,7 @@ async def _generate_and_send(
             exclude_ids = {m.id for m in unanswered}
             wa_ids = [m.whatsapp_message_id for m in unanswered if m.whatsapp_message_id]
             combined_text = "\n".join(m.content for m in unanswered if m.content).strip()
-            media = _latest_media(unanswered)
+            media = _collect_media(unanswered)
 
             history = await _fetch_history(db, tenant.id, contact_id, exclude_ids=exclude_ids)
 
@@ -660,15 +660,18 @@ async def _save_outbound(
             logger.exception("outbound_persist_failed", extra={"contact_id": str(contact_id)})
 
 
-def _latest_media(messages: list[Message]) -> tuple[bytes, str] | None:
-    """Reconstruct (bytes, mime) from the most recent media message in the burst,
-    decoding the data URI saved in Phase 1. Returns None when there's no media."""
-    for msg in reversed(messages):
+def _collect_media(messages: list[Message]) -> list[tuple[bytes, str]]:
+    """Reconstruct (bytes, mime) for EVERY media message in the burst, in order,
+    decoding the data URIs saved in Phase 1. A patient often sends two voice
+    notes in a row — forwarding only the last one dropped the first (it became a
+    contentless "[áudio]" marker in history). Returns [] when there's no media."""
+    out: list[tuple[bytes, str]] = []
+    for msg in messages:
         if msg.media_url and msg.media_mime_type:
             data = _decode_data_uri(msg.media_url)
             if data is not None:
-                return data, msg.media_mime_type
-    return None
+                out.append((data, msg.media_mime_type))
+    return out
 
 
 def _decode_data_uri(media_url: str) -> bytes | None:

@@ -125,7 +125,10 @@ class Settings(BaseSettings):
 
     # ── Logging ──────────────────────────────────────────────────────────────
     LOG_LEVEL: str = "INFO"
-    LOG_FORMAT: str = "json"                       # json | text
+    # "text" = human-scannable pretty log (icons + friendly pt-BR labels, ideal
+    # for reading in the EasyPanel console). "json" = structured single-line for
+    # log aggregators (Datadog/Loki/etc.).
+    LOG_FORMAT: str = "text"                       # text | json
 
     # ── Error alerting (email on ERROR-level logs) ───────────────────────────
     # Off by default. When enabled + SMTP configured, any ERROR log (e.g. Sofia
