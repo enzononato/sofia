@@ -13,9 +13,27 @@ from types import SimpleNamespace
 from zoneinfo import ZoneInfo
 
 from app.models.message import MessageDirection
-from app.services.ai import _annotate_history
+from app.services.ai import _annotate_history, _normalize_mime
 
 _TZ = ZoneInfo("America/Sao_Paulo")
+
+
+# ── Media MIME normalization (fixes empty Gemini responses on WhatsApp audio) ──
+def test_normalize_mime_strips_codec_parameter():
+    assert _normalize_mime("audio/ogg; codecs=opus") == "audio/ogg"
+
+
+def test_normalize_mime_lowercases_and_trims():
+    assert _normalize_mime("  AUDIO/OGG  ") == "audio/ogg"
+
+
+def test_normalize_mime_passthrough_plain_type():
+    assert _normalize_mime("image/jpeg") == "image/jpeg"
+
+
+def test_normalize_mime_empty_falls_back():
+    assert _normalize_mime("") == "application/octet-stream"
+    assert _normalize_mime(None) == "application/octet-stream"
 
 
 def _msg(direction: str = MessageDirection.INBOUND.value):

@@ -103,11 +103,12 @@ vezes seguidas com os mesmos argumentos: use o resultado que já recebeu e respo
 - NUNCA afirme um preço sem antes ter o dado do list_services nesta conversa — isso inclui \
 dizer que algo é "grátis", "cortesia" ou "sem custo". Se o preço vier não informado, diga que \
 o valor é definido na avaliação; não presuma que uma "avaliação" é gratuita só pelo nome.
-- AVALIAÇÃO/CONSULTA: se for oferecer ou falar da avaliação/consulta, use SEMPRE o campo \
-evaluation_info do get_clinic_info. Se ele disser que é gratuita, pode dizer que é gratuita; se \
-disser um valor (e se abate ou não no procedimento), passe exatamente isso; se disser que NÃO está \
-configurada, NUNCA afirme que a avaliação é grátis nem que tem custo — ofereça agendar a avaliação e \
-diga que o valor é confirmado na clínica. Nunca invente que a consulta é "de graça" ou "sem custo".
+- AVALIAÇÃO/CONSULTA e PARCELAMENTO: no CONTEXTO ATUAL há sempre a seção "POLÍTICAS DA CLÍNICA" \
+com a política real de avaliação/consulta e de parcelamento. Use EXATAMENTE o que estiver ali — é a \
+única fonte. Se disser gratuita, pode dizer gratuita; se disser um valor (e se abate no procedimento), \
+passe exatamente isso; se disser que NÃO está configurada, NUNCA afirme que é grátis NEM que tem custo \
+(nem invente um número tipo "R$90") — ofereça agendar a avaliação e diga que o valor é confirmado na \
+clínica. O mesmo vale para parcelamento. Nunca contrarie a seção POLÍTICAS DA CLÍNICA.
 - PARCELAMENTO: só afirme quantidade de parcelas se get_clinic_info retornar max_installments \
 com um número. "Cartão de crédito" na lista de pagamentos NÃO significa que parcela, nem em \
 quantas vezes — se max_installments vier vazio e o paciente perguntar sobre parcelar, diga que \
@@ -311,6 +312,15 @@ _MEDIA_LABELS = {
     "document": "documento",
 }
 
+# WhatsApp voice notes arrive as "audio/ogg; codecs=opus". Gemini's inline_data
+# matches on the base MIME type, so the "; codecs=..." parameter (or any
+# whitespace/case noise) can make it reject an otherwise-supported audio and
+# return an empty candidate. Strip parameters and lowercase to the base type.
+def _normalize_mime(mime_type: str) -> str:
+    if not mime_type:
+        return "application/octet-stream"
+    return mime_type.split(";", 1)[0].strip().lower() or "application/octet-stream"
+
 
 def _history_text_for(msg: Message) -> str | None:
     """
@@ -506,7 +516,9 @@ async def generate_reply(
     # inline_data part, so Gemini "hears"/"sees" every one — not just the last.
     current_parts: list[types.Part] = []
     for media_bytes, mime_type in media_items:
-        current_parts.append(types.Part(inline_data=types.Blob(data=media_bytes, mime_type=mime_type)))
+        current_parts.append(
+            types.Part(inline_data=types.Blob(data=media_bytes, mime_type=_normalize_mime(mime_type)))
+        )
     if new_message:
         current_parts.append(types.Part(text=new_message))
     if not current_parts:
@@ -529,6 +541,7 @@ async def generate_reply(
     )
 
     # Tool-calling loop
+    empty_retries = 0  # Gemini occasionally returns an empty candidate; retry once.
     for iteration in range(MAX_TOOL_ITERATIONS):
         logger.debug(
             "gemini_iteration",
@@ -573,6 +586,7 @@ async def generate_reply(
                 extra={
                     "finish_reason": str(finish_reason),
                     "iteration": iteration,
+                    "retry": empty_retries,
                     "model": model,
                     "tenant_id": str(tenant.id),
                     "contact_id": str(contact.id),
@@ -581,9 +595,16 @@ async def generate_reply(
             fallback = (getattr(response, "text", None) or "").strip()
             if fallback:
                 return fallback, model
+            # Empty candidates are often transient (seen on single audio turns).
+            # Retry the SAME request once before giving up — contents are
+            # unchanged, so `continue` just re-generates. Only asking the patient
+            # to resend as a last resort avoids the "reenvie" loop on a fluke.
+            if empty_retries < 1:
+                empty_retries += 1
+                continue
             return (
-                "Desculpe, não consegui formular a resposta agora. "
-                "Pode reenviar sua última mensagem, por favor?",
+                "Desculpe, tive um probleminha para processar sua mensagem agora. "
+                "Pode me mandar de novo, por favor? 😊",
                 model,
             )
 

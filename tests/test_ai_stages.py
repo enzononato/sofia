@@ -100,3 +100,49 @@ def test_upcoming_cancelled_appointment_is_ignored():
         _contact(), Stage.RETURNING_LEAD, [cancelled_appt], tenant_settings={"schedule": {}}
     )
     assert "Próximo agendamento" not in block
+
+
+# ── Financial policies injected on every turn (always-on, not tool-gated) ────
+# A live test showed Sofia inventing an evaluation price / saying "gratuita" when
+# it was paid, because the policy lived only in get_clinic_info (often not
+# called). It must now appear in the context block itself.
+
+def _policy_block(clinic: dict) -> str:
+    return build_context_block(
+        _contact(), Stage.FIRST_CONTACT, [], tenant_settings={"clinic": clinic}
+    )
+
+
+def test_context_block_always_has_policies_section():
+    block = _policy_block({})
+    assert "POLÍTICAS DA CLÍNICA" in block
+
+
+def test_context_block_evaluation_unset_says_not_configured():
+    block = _policy_block({})
+    assert "NÃO configurada" in block or "NÃO afirme" in block
+
+
+def test_context_block_evaluation_paid_deductible_is_verbatim():
+    block = _policy_block(
+        {"evaluation_fee_mode": "paid", "evaluation_fee": 100, "evaluation_fee_deductible": True}
+    )
+    assert "100" in block
+    assert "ABATIDO" in block or "abat" in block.lower()
+    # And must NOT say it's free.
+    assert "gratuita" not in block.lower().split("POLÍTICAS DA CLÍNICA", 1)[-1]
+
+
+def test_context_block_evaluation_free_says_free():
+    block = _policy_block({"evaluation_fee_mode": "free"})
+    assert "GRATUITA" in block or "gratuita" in block.lower()
+
+
+def test_context_block_installments_unset_warns_not_configured():
+    block = _policy_block({})
+    assert "Parcelamento não configurado" in block
+
+
+def test_context_block_installments_configured_shows_number():
+    block = _policy_block({"max_installments": 6})
+    assert "6x" in block

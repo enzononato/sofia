@@ -1026,6 +1026,24 @@ _WEEKDAY_NAME_PT = {
 }
 
 
+def _installments_info(clinic: dict) -> str:
+    """Human-readable installment policy from structured clinic settings, so
+    Sofia never invents "até 3x". Returns the not-configured warning when unset."""
+    raw = clinic.get("max_installments")
+    try:
+        n = int(raw) if raw else None
+        if n is not None and n < 2:
+            n = None
+    except (TypeError, ValueError):
+        n = None
+    if n:
+        return f"Parcelamento em até {n}x no cartão de crédito."
+    return (
+        "Parcelamento não configurado — a quantidade de parcelas é combinada na "
+        "clínica; NÃO invente um número."
+    )
+
+
 def _evaluation_policy_info(clinic: dict) -> str:
     """
     Human-readable policy for the paid/free evaluation (avaliação/consulta), built
@@ -1079,9 +1097,6 @@ async def _get_clinic_info(tenant_settings: dict, tenant_name: str | None = None
     schedule = tenant_settings.get("schedule", {}) or {}
     working_days = schedule.get("working_days", [1, 2, 3, 4, 5])
 
-    # Installments: only a real configured number is exposed. When unset, we say
-    # so explicitly ("não configurado") — a live production chat showed the model
-    # filling this gap with an invented "até 3 vezes" when the field was absent.
     raw_installments = clinic.get("max_installments")
     try:
         max_installments = int(raw_installments) if raw_installments else None
@@ -1098,11 +1113,7 @@ async def _get_clinic_info(tenant_settings: dict, tenant_name: str | None = None
         "instagram": clinic.get("instagram"),
         "payment_methods": clinic.get("payment_methods", []),
         "max_installments": max_installments,
-        "installments_info": (
-            f"Parcelamento em até {max_installments}x no cartão de crédito."
-            if max_installments
-            else "Parcelamento não configurado — a quantidade de parcelas é combinada na clínica; NÃO invente um número."
-        ),
+        "installments_info": _installments_info(clinic),
         "evaluation_info": _evaluation_policy_info(clinic),
         "additional_info": clinic.get("additional_info"),
         "schedule": {

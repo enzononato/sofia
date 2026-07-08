@@ -22,7 +22,12 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.models.appointment import Appointment, AppointmentStatus
 from app.models.contact import Contact
 from app.models.message import Message
-from app.services.ai_tools import _clinic_tz, _fmt_local
+from app.services.ai_tools import (
+    _clinic_tz,
+    _evaluation_policy_info,
+    _fmt_local,
+    _installments_info,
+)
 
 
 class Stage(str, Enum):
@@ -232,5 +237,15 @@ def build_context_block(
         lines.append(f"Última visita realizada: {_fmt_local(last.scheduled_at, tz)}")
 
     lines.append(f"Estágio da conversa: {stage.value}")
+
+    # Financial policies injected on EVERY turn (not only when get_clinic_info is
+    # called) — the model kept inventing an evaluation price / installments when
+    # it didn't fetch them. Having the real policy always in front removes the gap.
+    clinic = (tenant_settings or {}).get("clinic", {}) or {}
+    lines.append("")
+    lines.append("--- POLÍTICAS DA CLÍNICA (use EXATAMENTE isto; nunca invente valor/parcela/gratuidade) ---")
+    lines.append(f"Avaliação/consulta: {_evaluation_policy_info(clinic)}")
+    lines.append(f"Parcelamento: {_installments_info(clinic)}")
+
     lines.append("--- FIM DO CONTEXTO ---")
     return "\n".join(lines)
