@@ -388,28 +388,80 @@ def _annotate_history(
     return result
 
 
-async def generate_followup_message(tenant: Tenant, contact: Contact) -> str | None:
+async def generate_followup_message(
+    tenant: Tenant,
+    contact: Contact,
+    recent_messages: list[Message] | None = None,
+) -> str | None:
     """
     Generate a short, warm re-engagement message for a contact who went silent.
     Single Gemini call, no tools. Returns None on failure (caller skips sending).
+
+    `recent_messages` — optionally, the last ~10 TEXT-bearing messages of the
+    conversation (oldest → newest; see followups.py::run_reengagement, which
+    fetches them before calling this). When present and substantial enough,
+    the message references the patient's actual concrete interest (e.g.
+    "you'd asked about X") instead of a generic nudge — never inventing
+    anything beyond what's literally in that history. With no/thin history
+    (or on failure), falls back to the original generic, name-only
+    re-engagement.
     """
     ai_cfg = tenant.ai_config or {}
     model = ai_cfg.get("model") or settings.DEFAULT_AI_MODEL
     name = contact.full_name or "paciente"
-    instruction = (
-        f'Você é Sofia, a secretária da clínica "{tenant.name}" — uma pessoa de verdade para o '
-        f"paciente, nunca revele que é uma IA. "
-        f"Escreva UMA mensagem curta (1 a 2 frases), calorosa e natural em português do Brasil, "
-        f"reengajando o paciente {name}, que parou de responder há alguns dias. "
-        "Convide-o gentilmente a retomar a conversa ou tirar dúvidas. "
-        "Não invente informações, não prometa nada específico e não use linguagem robótica."
-    )
+
+    # Compact transcript from the text-bearing messages the caller handed us
+    # (media-only / empty-content entries are skipped — pure text signal).
+    transcript_lines: list[str] = []
+    for msg in (recent_messages or [])[-10:]:
+        text = (msg.content or "").strip()
+        if not text:
+            continue
+        speaker = "Paciente" if msg.direction == MessageDirection.INBOUND else "Sofia"
+        transcript_lines.append(f"{speaker}: {text}")
+
+    if len(transcript_lines) >= 2:
+        transcript = "\n".join(transcript_lines)
+        stage = getattr(contact, "crm_stage", None) or "desconhecido"
+        instruction = (
+            f'Você é Sofia, a secretária da clínica "{tenant.name}" — uma pessoa de verdade para o '
+            f"paciente, nunca revele que é uma IA. "
+            f"O paciente {name} parou de responder há alguns dias. Estágio atual no funil: {stage}.\n\n"
+            "Trecho recente da conversa (da mais antiga para a mais nova):\n"
+            f"{transcript}\n\n"
+            "Escreva UMA mensagem curta (1 a 2 frases), calorosa e natural em português do Brasil, "
+            "retomando contato com esse paciente. SE houver um assunto ou interesse concreto e claro "
+            "no trecho acima (ex: um serviço/procedimento específico que ele perguntou), mencione-o "
+            "brevemente para mostrar que você lembra da conversa (ex: 'vi que você tinha perguntado "
+            "sobre a limpeza de pele...'). Se não houver nada concreto e claro no trecho, seja apenas "
+            "genérica e calorosa, sem inventar nenhum assunto. PROIBIDO inventar qualquer informação, "
+            "serviço, valor ou detalhe que não esteja literalmente no trecho acima. Não soe como "
+            "cobrança nem como vendedor — soe como alguém que se importa. Não use linguagem robótica."
+        )
+    else:
+        instruction = (
+            f'Você é Sofia, a secretária da clínica "{tenant.name}" — uma pessoa de verdade para o '
+            f"paciente, nunca revele que é uma IA. "
+            f"Escreva UMA mensagem curta (1 a 2 frases), calorosa e natural em português do Brasil, "
+            f"reengajando o paciente {name}, que parou de responder há alguns dias. "
+            "Convide-o gentilmente a retomar a conversa ou tirar dúvidas. "
+            "Não invente informações, não prometa nada específico e não use linguagem robótica."
+        )
     try:
         client = _get_client()
         response = await client.aio.models.generate_content(
             model=model,
             contents=[types.Content(role="user", parts=[types.Part(text=instruction)])],
-            config=types.GenerateContentConfig(temperature=0.8, max_output_tokens=200),
+            # thinking_budget=0: matches generate_reply()'s config (see the
+            # final-completion call below in this module). Without this,
+            # gemini-2.5-flash silently burns almost the entire
+            # max_output_tokens budget on internal "thinking" tokens and the
+            # visible reply comes back truncated to a few words.
+            config=types.GenerateContentConfig(
+                temperature=0.8,
+                max_output_tokens=200,
+                thinking_config=types.ThinkingConfig(thinking_budget=0),
+            ),
         )
         text = (response.text or "").strip()
         return text or None
