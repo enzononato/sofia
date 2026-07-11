@@ -3,7 +3,7 @@
 import { useAuthStore } from "@/store/useAuthStore";
 import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar";
 import { Button } from "@/components/ui/button";
-import { LogOut, Menu, User, Bell, Sparkles } from "lucide-react";
+import { LogOut, Menu, User } from "lucide-react";
 import { Sheet, SheetContent, SheetTrigger, SheetTitle } from "@/components/ui/sheet";
 import { Sidebar } from "./sidebar";
 import {
@@ -44,18 +44,6 @@ export function Navbar() {
       </div>
 
       <div className="flex items-center gap-6">
-        {/* Decorative mockup icons */}
-        <div className="hidden sm:flex items-center gap-4">
-          <button className="text-muted-foreground hover:text-primary transition-colors flex items-center gap-1.5 text-xs font-semibold">
-            <Sparkles className="h-4 w-4 text-primary animate-pulse" />
-            <span className="font-mono uppercase tracking-wider text-[10px]">Sofia Insights</span>
-          </button>
-          <button className="text-muted-foreground hover:text-foreground transition-colors relative h-8 w-8 flex items-center justify-center rounded-full hover:bg-white/5">
-            <Bell className="h-4 w-4" />
-            <span className="absolute top-1.5 right-1.5 w-2 h-2 bg-destructive rounded-full"></span>
-          </button>
-        </div>
-
         <DropdownMenu>
           <DropdownMenuTrigger className="flex items-center gap-3 pl-4 border-l border-white/10 hover:opacity-90 transition-opacity focus:outline-none cursor-pointer">
             <div className="text-right hidden sm:block">
