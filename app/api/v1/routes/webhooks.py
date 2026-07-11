@@ -27,6 +27,7 @@ from datetime import datetime
 
 from fastapi import APIRouter, BackgroundTasks, Request, status
 from sqlalchemy import desc, select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import settings
@@ -513,7 +514,20 @@ async def _process_inbound_message(tenant: Tenant, data: dict, request_id: str |
                     media_url=media_url,
                 )
                 db.add(inbound_msg)
-                await db.commit()
+                try:
+                    await db.commit()
+                except IntegrityError:
+                    # Two concurrent deliveries of the same webhook both passed the
+                    # SELECT fast-path above before either committed. The partial
+                    # unique index on (tenant_id, whatsapp_message_id) — see
+                    # migration d4e5f6a7b8c9 — catches the race at the DB level;
+                    # treat it exactly like the SELECT-based duplicate above.
+                    await db.rollback()
+                    logger.info(
+                        "webhook_duplicate_race_skipped",
+                        extra={**log_ctx, "phone": phone, "whatsapp_message_id": message_id},
+                    )
+                    return
 
                 contact_id = contact.id
             except Exception:
@@ -626,7 +640,16 @@ async def _process_human_outbound_message(
                         media_type=media_kind,
                     )
                 )
-                await db.commit()
+                try:
+                    await db.commit()
+                except IntegrityError:
+                    # Same race as the inbound path — see migration d4e5f6a7b8c9.
+                    await db.rollback()
+                    logger.info(
+                        "webhook_human_outbound_duplicate_race_skipped",
+                        extra={**log_ctx, "phone": phone, "whatsapp_message_id": message_id},
+                    )
+                    return
                 logger.info(
                     "webhook_human_outbound_saved",
                     extra={**log_ctx, "phone": phone, "contact_id": str(contact.id)},
