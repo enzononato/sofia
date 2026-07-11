@@ -36,6 +36,9 @@ export interface TenantSettings {
     reengagement_enabled?: boolean;
     reengage_after_days?: number;
     reengage_cooldown_days?: number;
+    /** E-mail alert to the clinic when Sofia hands a conversation off to a
+     * human (fresh handoff + "still waiting" follow-up). Default true. */
+    handoff_alert_email_enabled?: boolean;
   };
   ignore_groups?: boolean;
 }

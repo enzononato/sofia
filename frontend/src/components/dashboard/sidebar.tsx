@@ -4,6 +4,7 @@ import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { cn } from "@/lib/utils";
 import { useAuthStore } from "@/store/useAuthStore";
+import { useContacts } from "@/hooks/useInbox";
 import {
   MessageCircle,
   Calendar,
@@ -33,6 +34,12 @@ export function Sidebar({ className }: { className?: string }) {
   const userRole = useAuthStore((s) => s.userRole);
   const isAdmin = userRole === "owner" || userRole === "admin";
   const visibleNav = navigation.filter((item) => !item.adminOnly || isAdmin);
+
+  // Real count of contacts waiting on a human (ai_paused) — reuses the same
+  // polling query the Inbox uses, so it stays accurate without a dedicated
+  // endpoint. Shown as a badge on "Inbox" so it's visible from any page.
+  const { data: contacts } = useContacts();
+  const waitingCount = (contacts ?? []).filter((c) => c.ai_paused).length;
 
   return (
     <div
@@ -73,7 +80,15 @@ export function Sidebar({ className }: { className?: string }) {
                 )}
               >
                 <item.icon className={cn("h-4 w-4", isActive ? "text-primary" : "")} />
-                <span>{item.name}</span>
+                <span className="flex-1">{item.name}</span>
+                {item.href === "/dashboard/inbox" && waitingCount > 0 && (
+                  <span
+                    className="min-w-[20px] h-5 px-1.5 rounded-full bg-amber-500 text-white text-[10px] font-bold flex items-center justify-center animate-pulse"
+                    title={`${waitingCount} paciente(s) aguardando atendimento humano`}
+                  >
+                    {waitingCount > 99 ? "99+" : waitingCount}
+                  </span>
+                )}
               </Link>
             );
           })}

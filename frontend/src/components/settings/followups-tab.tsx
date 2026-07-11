@@ -6,16 +6,17 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Switch } from "@/components/ui/switch";
-import { 
-  BellRing, 
-  Loader2, 
-  Save, 
-  MessageCircleHeart, 
-  Lightbulb, 
-  MessageSquare, 
-  Mail, 
-  Sparkles, 
-  Info 
+import {
+  BellRing,
+  Loader2,
+  Save,
+  MessageCircleHeart,
+  Lightbulb,
+  MessageSquare,
+  Mail,
+  Sparkles,
+  Info,
+  UserCheck,
 } from "lucide-react";
 
 export function FollowupsTab({ tenant }: { tenant: TenantProfile }) {
@@ -29,6 +30,11 @@ export function FollowupsTab({ tenant }: { tenant: TenantProfile }) {
   const [reengageEnabled, setReengageEnabled] = useState<boolean>(f.reengagement_enabled ?? true);
   const [afterDays, setAfterDays] = useState<string>(String(f.reengage_after_days ?? 3));
   const [cooldownDays, setCooldownDays] = useState<string>(String(f.reengage_cooldown_days ?? 7));
+  // Alert e-mail to the clinic when Sofia hands a conversation off to a human
+  // (fresh handoff + the "still waiting" follow-up alert). Default on.
+  const [handoffAlertEnabled, setHandoffAlertEnabled] = useState<boolean>(
+    f.handoff_alert_email_enabled ?? true
+  );
   const [error, setError] = useState<string | null>(null);
 
   const parseHours = (raw: string): number[] =>
@@ -55,6 +61,7 @@ export function FollowupsTab({ tenant }: { tenant: TenantProfile }) {
             reengagement_enabled: reengageEnabled,
             reengage_after_days: Math.max(1, parseInt(afterDays, 10) || 3),
             reengage_cooldown_days: Math.max(1, parseInt(cooldownDays, 10) || 7),
+            handoff_alert_email_enabled: handoffAlertEnabled,
           },
         },
       });
@@ -209,6 +216,32 @@ export function FollowupsTab({ tenant }: { tenant: TenantProfile }) {
           <div className="mt-8 flex items-center gap-3 text-[10px] text-muted-foreground/80 font-sans">
             <Info className="h-4 w-4 text-muted-foreground/60 shrink-0" />
             <span>Sofia utiliza Processamento de Linguagem Natural para adaptar o tom de voz ao histórico do paciente.</span>
+          </div>
+        </section>
+
+        {/* Handoff Alert Section */}
+        <section className="glass-panel rounded-3xl p-8 border border-white/10 bg-white/[0.02] shadow-2xl transition-all hover:border-amber-500/20">
+          <div className="flex items-start justify-between mb-4">
+            <div className="flex gap-4">
+              <div className="w-12 h-12 rounded-2xl bg-amber-500/10 flex items-center justify-center text-amber-400 shrink-0 border border-amber-500/20">
+                <UserCheck className="h-6 w-6 text-amber-400" />
+              </div>
+              <div>
+                <h3 className="font-heading text-lg font-bold text-foreground">Alerta de Atendimento Humano</h3>
+                <p className="text-xs text-muted-foreground/80 font-sans mt-0.5">
+                  Avisa por e-mail quando a Sofia transfere uma conversa para a equipe — e novamente se ninguém responder a tempo.
+                </p>
+              </div>
+            </div>
+            <Switch
+              checked={handoffAlertEnabled}
+              onCheckedChange={setHandoffAlertEnabled}
+              className="cursor-pointer"
+            />
+          </div>
+          <div className="flex items-center gap-3 text-[10px] text-muted-foreground/80 font-sans">
+            <Mail className="h-4 w-4 text-muted-foreground/60 shrink-0" />
+            <span>Enviado para o e-mail cadastrado da clínica.</span>
           </div>
         </section>
 
