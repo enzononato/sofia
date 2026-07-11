@@ -205,6 +205,11 @@ async def send_manual_message(
         ai_model_used=None,  # Manual message, no AI
     )
     db.add(msg)
+    # A human on the team just took over this conversation — pause Sofia in the
+    # SAME transaction as the send so there's no window for the message_batcher
+    # to fire an automatic reply before a separate PATCH would have paused it
+    # (the frontend also does this PATCH, but it's now redundant, not load-bearing).
+    contact.ai_paused = True
     await db.commit()
     await db.refresh(msg)
     return msg
@@ -294,6 +299,9 @@ async def send_media_message(
         ai_model_used=None,
     )
     db.add(msg)
+    # Same rationale as send_manual_message: pause Sofia server-side, in the same
+    # commit as the send, so the message_batcher can't race an automatic reply.
+    contact.ai_paused = True
     await db.commit()
     await db.refresh(msg)
     return msg
