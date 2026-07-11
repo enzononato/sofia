@@ -21,6 +21,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
+from app.config import settings
 from app.models.appointment import Appointment, AppointmentStatus
 from app.models.contact import Contact, CrmStage
 from app.models.professional import ProfessionalWorkHours, professional_services
@@ -521,6 +522,81 @@ async def _booked_windows(
     return windows
 
 
+# Small tolerance for clock skew between the AI/client and the server when
+# validating that a booking start isn't in the past — rejecting anything more
+# than this many minutes behind "now" avoids false positives from a few
+# seconds/minutes of drift while still catching genuinely past times.
+_PAST_BOOKING_TOLERANCE_MINUTES = 5
+
+
+def _reject_if_past(start: datetime, now_local: datetime, tolerance_minutes: int = _PAST_BOOKING_TOLERANCE_MINUTES) -> str | None:
+    """
+    Pure check: returns a patient-facing error message if `start` (tz-aware) is
+    already in the past relative to `now_local` (tz-aware, same zone), beyond a
+    small clock-skew tolerance. Returns None when the start is still bookable.
+    Used by both booking paths (capacity and per-professional) so neither can
+    create/reschedule an appointment that starts in the past.
+    """
+    if start < now_local - timedelta(minutes=tolerance_minutes):
+        return "Esse horário já passou. Por favor, escolha um horário futuro."
+    return None
+
+
+def _earliest_bookable_start(
+    target_date: date, now_local: datetime, lead_minutes: int
+) -> datetime | None:
+    """
+    Pure: the earliest instant `check_availability` may offer a slot for
+    `target_date`. Returns None when the date isn't "today" (no lead-time
+    constraint applies to future dates). For today, returns now + lead_minutes
+    so a clinic doesn't get asked to fit in a walk-in with no notice.
+    """
+    if target_date != now_local.date():
+        return None
+    return now_local + timedelta(minutes=lead_minutes)
+
+
+def _generate_day_slots(
+    day_open: datetime,
+    day_close: datetime,
+    lunch_range: tuple[datetime, datetime] | None,
+    booked_ranges: list[tuple[datetime, datetime]],
+    slot_dur: timedelta,
+    granularity_dur: timedelta,
+    capacity: int,
+    earliest: datetime | None = None,
+) -> list[str]:
+    """
+    Pure slot-grid generator (capacity/single-schedule mode), extracted from
+    `_check_availability` so the "never offer a past slot" rule is directly
+    testable without a DB. A slot is free while fewer than `capacity`
+    appointments overlap it; `earliest` (when given) additionally excludes any
+    slot starting before that instant — used to hide today's already-passed
+    (or too-soon) times.
+    """
+    available: list[str] = []
+    cursor = day_open
+    while cursor + slot_dur <= day_close:
+        slot_end = cursor + slot_dur
+
+        if earliest is not None and cursor < earliest:
+            cursor += granularity_dur
+            continue
+
+        if lunch_range and cursor < lunch_range[1] and slot_end > lunch_range[0]:
+            cursor += granularity_dur
+            continue
+
+        overlaps = sum(1 for start, end in booked_ranges if cursor < end and slot_end > start)
+        if overlaps >= capacity:
+            cursor += granularity_dur
+            continue
+
+        available.append(cursor.strftime("%H:%M"))
+        cursor += granularity_dur
+    return available
+
+
 async def _validate_booking(
     db: AsyncSession,
     tenant_id: uuid.UUID,
@@ -533,8 +609,9 @@ async def _validate_booking(
     Validate a booking window [start, end) against the clinic schedule.
     Returns an error message string if invalid, or None if the slot is bookable.
 
-    Checks: working day, within business hours, outside lunch break, and that the
-    number of overlapping appointments is below the clinic `capacity`.
+    Checks: not in the past, working day, within business hours, outside lunch
+    break, and that the number of overlapping appointments is below the clinic
+    `capacity`.
 
     NOTE: callers must hold the per-tenant advisory lock (see `_lock_tenant`) so the
     overlap count cannot change between this check and the subsequent insert/update.
@@ -543,6 +620,11 @@ async def _validate_booking(
     local_start = start.astimezone(tz)
     local_end = end.astimezone(tz)
     target_date = local_start.date()
+
+    now_local = datetime.now(timezone.utc).astimezone(tz)
+    past_error = _reject_if_past(local_start, now_local)
+    if past_error:
+        return past_error
 
     sched = _resolve_schedule(tenant_settings, target_date)
 
@@ -669,6 +751,17 @@ async def _check_availability(
 
     weekday_pt = _WEEKDAY_NAME_PT[target_date.isoweekday()]
 
+    # Never offer a slot for a date that has already fully passed — return
+    # early before any DB work, with a message the AI can relay naturally.
+    now_local = datetime.now(timezone.utc).astimezone(tz)
+    if target_date < now_local.date():
+        return {
+            "date": args["date"],
+            "weekday": weekday_pt,
+            "available_slots": [],
+            "error": "Essa data já passou. Escolha uma data a partir de hoje.",
+        }
+
     # Closed day — return early before any DB work
     if target_date.isoweekday() not in sched["working_days"]:
         return {
@@ -713,25 +806,14 @@ async def _check_availability(
 
     # ── Generate available slots ──────────────────────────────────────────────
     # A slot is free while fewer than `capacity` appointments overlap it
-    # (capacity ≈ professionals/rooms working in parallel; default 1).
-    available: list[str] = []
-    cursor = day_open
-
-    while cursor + slot_dur <= day_close:
-        slot_end = cursor + slot_dur
-
-        # Reject if the slot window overlaps the lunch break
-        if lunch_range and cursor < lunch_range[1] and slot_end > lunch_range[0]:
-            cursor += granularity_dur
-            continue
-
-        overlaps = sum(1 for start, end in booked_ranges if cursor < end and slot_end > start)
-        if overlaps >= capacity:
-            cursor += granularity_dur
-            continue
-
-        available.append(cursor.strftime("%H:%M"))
-        cursor += granularity_dur
+    # (capacity ≈ professionals/rooms working in parallel; default 1). For
+    # "today", never offer a slot starting before now + MIN_BOOKING_LEAD_MINUTES
+    # (see app/config.py) — e.g. it's 16:00 and the day's grid still has 09:00.
+    earliest = _earliest_bookable_start(target_date, now_local, settings.MIN_BOOKING_LEAD_MINUTES)
+    available = _generate_day_slots(
+        day_open, day_close, lunch_range, booked_ranges, slot_dur, granularity_dur, capacity,
+        earliest=earliest,
+    )
 
     if not available:
         return {
@@ -1412,12 +1494,19 @@ def _slots_in_blocks(
     booked: list[tuple[datetime, datetime]],
     slot_dur: timedelta,
     granularity: timedelta,
+    earliest: datetime | None = None,
 ) -> list[datetime]:
+    """Pure. `earliest` (when given) excludes any slot starting before that
+    instant — used so per-professional availability never offers a slot for
+    "today" that has already passed (or is inside the minimum lead time)."""
     slots: list[datetime] = []
     for bstart, bend in blocks:
         cursor = bstart
         while cursor + slot_dur <= bend:
             slot_end = cursor + slot_dur
+            if earliest is not None and cursor < earliest:
+                cursor += granularity
+                continue
             if not any(cursor < e and slot_end > s for s, e in booked):
                 slots.append(cursor)
             cursor += granularity
@@ -1481,6 +1570,16 @@ async def _check_availability_pp(
     slot_dur = timedelta(minutes=service.duration_minutes)
     granularity = _granularity(tenant_settings, service.duration_minutes)
 
+    now_local = datetime.now(timezone.utc).astimezone(tz)
+    if target_date < now_local.date():
+        return {
+            "date": args["date"],
+            "weekday": weekday_pt,
+            "available_slots": [],
+            "error": "Essa data já passou. Escolha uma data a partir de hoje.",
+        }
+    earliest = _earliest_bookable_start(target_date, now_local, settings.MIN_BOOKING_LEAD_MINUTES)
+
     professionals = await _professionals_for_service(db, tenant_id, service.id)
     requested = args.get("professional_id")
     if requested:
@@ -1506,7 +1605,7 @@ async def _check_availability_pp(
         booked = await _booked_windows(
             db, tenant_id, tz, day_start, day_end, professional_id=prof.id
         )
-        for slot in _slots_in_blocks(blocks, booked, slot_dur, granularity):
+        for slot in _slots_in_blocks(blocks, booked, slot_dur, granularity, earliest=earliest):
             agg.setdefault(slot.strftime("%H:%M"), []).append(
                 {"id": str(prof.id), "name": prof.full_name}
             )
@@ -1544,6 +1643,11 @@ async def _create_appointment_pp(
     tz = _clinic_tz(tenant_settings)
     if scheduled_at.tzinfo is None:
         scheduled_at = scheduled_at.replace(tzinfo=tz)
+
+    now_local = datetime.now(timezone.utc).astimezone(tz)
+    past_error = _reject_if_past(scheduled_at.astimezone(tz), now_local)
+    if past_error:
+        return {"error": past_error}
 
     service = await _resolve_service(db, tenant_id, args.get("service_id"))
     if service is None:
@@ -1641,6 +1745,11 @@ async def _reschedule_appointment_pp(
     tz = _clinic_tz(tenant_settings)
     if new_scheduled_at.tzinfo is None:
         new_scheduled_at = new_scheduled_at.replace(tzinfo=tz)
+
+    now_local = datetime.now(timezone.utc).astimezone(tz)
+    past_error = _reject_if_past(new_scheduled_at.astimezone(tz), now_local)
+    if past_error:
+        return {"error": past_error}
 
     await _lock_tenant(db, tenant_id)
 

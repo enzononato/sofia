@@ -43,6 +43,15 @@ class Settings(BaseSettings):
     GEMINI_API_KEY: Optional[str] = None
     DEFAULT_AI_MODEL: str = "gemini-2.5-flash"
     AI_HISTORY_LIMIT: int = 20
+    # Minimum lead time before a slot can be offered/booked for "today" (check_availability
+    # never returns a slot starting sooner than now + this many minutes). This is a default
+    # assumption, NOT confirmed by the product owner — revisit if the clinic ops team wants
+    # a different buffer.
+    MIN_BOOKING_LEAD_MINUTES: int = 30
+    # Retries for a transient Gemini API exception (network blip, 5xx) before giving up on
+    # a reply — separate from the existing "empty candidate" retry (different failure mode).
+    GEMINI_CALL_MAX_RETRIES: int = 2
+    GEMINI_CALL_RETRY_BACKOFF_SECONDS: float = 1.0
 
     # ── Conversation humanization (batching, partitioned replies, typing) ─────
     # These shape how Sofia replies on WhatsApp so it feels human. All in-process
