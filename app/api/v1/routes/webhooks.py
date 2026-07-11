@@ -130,10 +130,6 @@ async def whatsapp_webhook(
         )
         return {"received": True}
 
-    # Ignore our own outbound / API-sent messages (avoid loops)
-    if data.get("fromMe") or data.get("wasSentByApi"):
-        return {"received": True}
-
     # Ignore groups when the tenant has ignore_groups enabled (default: True)
     chatid = str(data.get("chatid") or "")
     is_group = bool(data.get("isGroup")) or chatid.endswith("@g.us")
@@ -143,6 +139,29 @@ async def whatsapp_webhook(
             "webhook_group_skipped",
             extra={"request_id": rid, "tenant_id": str(tenant.id), "chatid": chatid},
         )
+        return {"received": True}
+
+    from_me = bool(data.get("fromMe"))
+    sent_by_api = bool(data.get("wasSentByApi"))
+
+    if from_me and sent_by_api:
+        # Our own automated send — already persisted by _save_outbound() at send
+        # time. Ignore here to avoid double-persisting it and avoid reply loops.
+        return {"received": True}
+
+    if from_me and not sent_by_api:
+        # A human on staff typed directly into WhatsApp (phone app / WhatsApp
+        # Web), not through our API. Persist it as a normal OUTBOUND message so
+        # it shows in the Inbox and so Sofia sees it in history on her next
+        # reply (avoids contradicting what staff already told the patient).
+        # Does NOT generate an AI reply (it's OUTBOUND, never read by
+        # _collect_unanswered) and does NOT auto-pause Sofia — the auto-pause
+        # behavior is a separate, still-pending product decision.
+        logger.info(
+            "webhook_human_outbound_dispatching",
+            extra={"request_id": rid, "tenant_id": str(tenant.id), "tenant_slug": tenant_slug},
+        )
+        background_tasks.add_task(_process_human_outbound_message, tenant, data, rid)
         return {"received": True}
 
     logger.info(
@@ -535,6 +554,88 @@ async def _process_inbound_message(tenant: Tenant, data: dict, request_id: str |
 
     except Exception:
         logger.exception("webhook_processing_error", extra=log_ctx)
+
+
+async def _process_human_outbound_message(
+    tenant: Tenant, data: dict, request_id: str | None
+) -> None:
+    """
+    Persist a message a human on staff sent directly from their own phone /
+    WhatsApp Web (fromMe=true, wasSentByApi=false — NOT one of our automated
+    sends, those are wasSentByApi=true and handled at the call site instead).
+
+    Saved as a plain OUTBOUND Message (no ai_model_used — this didn't come from
+    Sofia) so it shows up in the Inbox and so Sofia sees it in history on her
+    next reply, instead of contradicting what staff already told the patient.
+
+    Deliberately does NOT:
+      - Trigger AI generation (it's OUTBOUND; _collect_unanswered only reads
+        INBOUND messages, so this can never feed the batcher/generate_reply).
+      - Auto-pause Sofia for this contact — that's a separate, still-pending
+        product decision (not this item's scope).
+
+    `chatid` (not `sender_pn`) is used to resolve the contact: for a fromMe
+    message, `sender_pn`/`sender` describe OUR OWN connected number, while
+    `chatid` is always the other side of the conversation — the patient.
+    """
+    log_ctx = {"request_id": request_id, "tenant_id": str(tenant.id)}
+    try:
+        chatid = str(data.get("chatid") or "")
+        sender_pn = str(data.get("sender_pn") or "")
+        sender = str(data.get("sender") or "")
+        phone = _phone_from_jid(chatid or sender_pn or sender)
+        message_id: str = str(data.get("messageid") or data.get("id") or "")
+        text = (data.get("text") or "").strip()
+        media_kind = _uazapi_media_kind(data.get("messageType", ""))
+
+        if not phone:
+            logger.info("webhook_human_outbound_no_phone", extra=log_ctx)
+            return
+        if not text and media_kind is None:
+            logger.info("webhook_human_outbound_empty_ignored", extra={**log_ctx, "phone": phone})
+            return
+
+        async with AsyncSessionLocal() as db:
+            try:
+                # Idempotency fast-path (same approach as inbound; item 1.5 adds
+                # a real unique constraint + IntegrityError handling on top).
+                if message_id:
+                    dup = await db.scalar(
+                        select(Message.id).where(
+                            Message.tenant_id == tenant.id,
+                            Message.whatsapp_message_id == message_id,
+                        )
+                    )
+                    if dup is not None:
+                        logger.info(
+                            "webhook_human_outbound_duplicate_skipped",
+                            extra={**log_ctx, "phone": phone, "whatsapp_message_id": message_id},
+                        )
+                        return
+
+                contact = await _find_or_create_contact(db, tenant, phone, push_name="")
+
+                db.add(
+                    Message(
+                        tenant_id=tenant.id,
+                        contact_id=contact.id,
+                        direction=MessageDirection.OUTBOUND,
+                        channel=MessageChannel.WHATSAPP,
+                        content=text,
+                        whatsapp_message_id=message_id or None,
+                        media_type=media_kind,
+                    )
+                )
+                await db.commit()
+                logger.info(
+                    "webhook_human_outbound_saved",
+                    extra={**log_ctx, "phone": phone, "contact_id": str(contact.id)},
+                )
+            except Exception:
+                await db.rollback()
+                raise
+    except Exception:
+        logger.exception("webhook_human_outbound_processing_error", extra=log_ctx)
 
 
 async def _generate_and_send(
