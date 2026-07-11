@@ -118,6 +118,8 @@ class Settings(BaseSettings):
     REENGAGE_JOB_HOURS: int = 6                       # how often the re-engagement job runs
     REENGAGE_AFTER_DAYS: int = 3                      # silence before a re-engagement nudge
     REENGAGE_COOLDOWN_DAYS: int = 7                   # min gap between nudges to the same contact
+    HANDOFF_ALERT_JOB_MINUTES: int = 10               # how often the "still paused" alert job runs
+    HANDOFF_ALERT_STALE_MINUTES: int = 30             # unanswered-inbound age that triggers the alert
 
     # ── Google Calendar (per-professional OAuth) ─────────────────────────────
     GOOGLE_CLIENT_ID: Optional[str] = None

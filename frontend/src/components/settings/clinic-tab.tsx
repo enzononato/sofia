@@ -10,7 +10,7 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Textarea } from "@/components/ui/textarea";
 import { Badge } from "@/components/ui/badge";
-import { MapPin, Phone, Mail, Globe, CreditCard, Info, Save, Loader2, Plus, X, CloudUpload, Edit, CheckCircle2, Sparkles, ArrowRight, Stethoscope } from "lucide-react";
+import { MapPin, Phone, Mail, Globe, CreditCard, Info, Save, Loader2, Plus, X, CloudUpload, Edit, CheckCircle2, Stethoscope } from "lucide-react";
 import { cn } from "@/lib/utils";
 
 const formSchema = z.object({
@@ -419,29 +419,6 @@ export function ClinicTab({ tenant }: { tenant: TenantProfile }) {
                 <span className="text-xs text-emerald-400 font-sans font-semibold">Informações salvas com sucesso!</span>
               </div>
             )}
-          </section>
-
-          {/* Sofia Insights Card */}
-          <section className="glass-panel rounded-3xl p-6 border border-white/10 bg-white/[0.02] overflow-hidden relative group shadow-2xl">
-            <div className="absolute -right-4 -top-4 w-32 h-32 bg-primary/10 blur-3xl rounded-full group-hover:bg-primary/20 transition-all pointer-events-none" />
-            <div className="flex items-start gap-4">
-              <div className="w-12 h-12 rounded-2xl bg-primary/20 flex items-center justify-center shrink-0 border border-primary/30 text-primary">
-                <Sparkles className="h-6 w-6 text-primary" />
-              </div>
-              <div className="space-y-2">
-                <h4 className="font-heading text-sm font-semibold text-primary">Análise de Presença Online</h4>
-                <p className="text-xs text-muted-foreground/80 leading-relaxed font-sans">
-                  Notei que seu perfil está <span className="text-[#fbabff] font-bold">85% completo</span>. Adicionar o link do seu Instagram pode aumentar a taxa de conversão de novos agendamentos em até <span className="text-primary font-bold">12%</span> com base em perfis similares.
-                </p>
-                <button
-                  type="button"
-                  className="mt-4 flex items-center gap-1.5 text-primary font-mono text-[10px] uppercase tracking-wider hover:underline decoration-primary/30 underline-offset-4 cursor-pointer"
-                >
-                  Aplicar melhorias sugeridas
-                  <ArrowRight className="h-3 w-3" />
-                </button>
-              </div>
-            </div>
           </section>
         </div>
 
