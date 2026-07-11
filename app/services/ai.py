@@ -46,6 +46,7 @@ from app.models.message import Message, MessageDirection
 from app.models.tenant import Tenant
 from app.services import ai_stages
 from app.services.ai_tools import CLINIC_TOOLS, execute_tool, _clinic_tz, _fmt_local
+from app.services.alerts import send_handoff_alert_email
 
 logger = logging.getLogger(__name__)
 
@@ -764,6 +765,14 @@ async def generate_reply(
                 "result_keys": list(tool_result.keys()) if isinstance(tool_result, dict) else None,
             },
         )
+
+        # Fire-and-forget: notify the clinic by email that a patient needs a
+        # human. Never awaited — email has its own timeout and must not add
+        # latency to Sofia's reply (see app/services/alerts.py docstring).
+        if fn.name == "request_human_handoff" and isinstance(tool_result, dict) and tool_result.get("success"):
+            asyncio.create_task(
+                send_handoff_alert_email(tenant, contact, dict(fn.args).get("reason"))
+            )
 
         # Append model's function_call turn + our function_response turn to the conversation
         contents.append(response_content)
