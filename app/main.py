@@ -10,28 +10,61 @@ Wiring order matters:
   5. Exception handlers and routers are attached last.
 """
 
+import logging
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from slowapi.errors import RateLimitExceeded
+from sqlalchemy import select
 
 from app.api.v1.router import api_router
 from app.config import settings
 from app.core.exception_handlers import install_exception_handlers, _envelope, _request_id
 from app.core.logging import configure_logging
 from app.core.rate_limit import limiter
-from app.database import engine
+from app.database import AsyncSessionLocal, engine
 from app.middleware.request_id import RequestIdMiddleware
 from app.middleware.security_headers import SecurityHeadersMiddleware
 from app.middleware.tenant import TenantMiddleware
+from app.models.tenant import Tenant
 from app.services.scheduler import shutdown_scheduler, start_scheduler
+
+_lifespan_logger = logging.getLogger(__name__)
+
+
+async def _warn_tenants_missing_webhook_secret() -> None:
+    """
+    One-time startup check (item 1.6 of the robustness plan): the WhatsApp
+    webhook now fails CLOSED when a tenant has no webhook_secret stored
+    (previously that case accepted ANY request unauthenticated). Any tenant
+    with a WhatsApp `token` but no matching `webhook_secret` will silently
+    stop receiving inbound messages after this change until they reconnect
+    WhatsApp (reconnecting regenerates the secret). This is purely an
+    operational heads-up logged once at boot — it never blocks/fails startup.
+    """
+    try:
+        async with AsyncSessionLocal() as db:
+            result = await db.execute(select(Tenant).where(Tenant.is_active.is_(True)))
+            tenants = result.scalars().all()
+    except Exception:
+        _lifespan_logger.exception("startup_webhook_secret_check_failed")
+        return
+
+    for tenant in tenants:
+        wa = (tenant.settings or {}).get("whatsapp", {}) or {}
+        if wa.get("token") and not wa.get("webhook_secret"):
+            _lifespan_logger.warning(
+                "tenant_missing_webhook_secret",
+                extra={"tenant_id": str(tenant.id), "tenant_slug": tenant.slug},
+            )
 
 
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
     configure_logging()
     start_scheduler()
+    await _warn_tenants_missing_webhook_secret()
     try:
         yield
     finally:

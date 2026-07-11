@@ -20,6 +20,7 @@ FastAPI BackgroundTask to avoid blocking UAZAPI's retry logic.
 
 import asyncio
 import base64
+import hmac
 import logging
 import time
 import uuid
@@ -48,6 +49,22 @@ router = APIRouter(prefix="/webhooks", tags=["Webhooks"])
 
 def _instance_token(tenant: Tenant) -> str | None:
     return (tenant.settings or {}).get("whatsapp", {}).get("token")
+
+
+def _webhook_secret_valid(expected_secret: str | None, provided_secret: str | None) -> bool:
+    """
+    Pure: fail CLOSED. A tenant with NO webhook_secret stored must reject every
+    request (previously it accepted ANY request unauthenticated in that case —
+    see item 1.6 of the robustness plan) — only a tenant WITH a stored secret
+    that matches the one provided is valid. Comparison is constant-time
+    (hmac.compare_digest) so response timing can't be used to brute-force the
+    secret. The caller must log the same WARNING and return the same opaque
+    200 response for both "no secret configured" and "wrong secret" so an
+    attacker can't distinguish the two from the outside.
+    """
+    if not expected_secret:
+        return False
+    return hmac.compare_digest(str(provided_secret or ""), str(expected_secret))
 
 
 @router.post("/whatsapp/{tenant_slug}", status_code=status.HTTP_200_OK)
@@ -103,10 +120,18 @@ async def whatsapp_webhook(
         return {"received": True}
 
     expected_secret = (tenant.settings or {}).get("whatsapp", {}).get("webhook_secret")
-    if expected_secret and provided_secret != expected_secret:
+    if not _webhook_secret_valid(expected_secret, provided_secret):
+        # Same WARNING + same opaque 200 response whether the tenant has NO
+        # secret stored or the wrong one was provided — never let the caller
+        # distinguish the two (see _webhook_secret_valid docstring).
         logger.warning(
             "webhook_invalid_secret",
-            extra={"request_id": rid, "tenant_id": str(tenant.id), "event": event},
+            extra={
+                "request_id": rid,
+                "tenant_id": str(tenant.id),
+                "event": event,
+                "has_expected_secret": bool(expected_secret),
+            },
         )
         return {"received": True}
 
