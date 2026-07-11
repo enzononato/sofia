@@ -24,7 +24,7 @@ import hmac
 import logging
 import time
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from fastapi import APIRouter, BackgroundTasks, Request, status
 from sqlalchemy import desc, func, select
@@ -1003,6 +1003,112 @@ async def _collect_unanswered(
 
     result = await db.execute(stmt)
     return list(result.scalars().all())
+
+
+# ── Post-restart recovery sweep (item 1.8) ───────────────────────────────────
+# If the server restarts while a patient's message is sitting in the debounce
+# window (8-20s), the inbound message is already persisted (Phase 1 already
+# committed) but nothing survives the restart to fire the reply — the pending
+# asyncio timer in message_batcher is in-process state and is lost. If the
+# patient doesn't write again, they're never answered. This sweep runs ONCE at
+# startup (see app/main.py lifespan) and re-schedules a reply for every
+# contact whose newest message is INBOUND and old enough to be safely "stuck"
+# (not one that arrived seconds ago and is still inside a live debounce
+# window elsewhere) but not so old it would ressuscitate a dead conversation.
+RECOVERY_SWEEP_MIN_AGE = timedelta(minutes=2)
+RECOVERY_SWEEP_MAX_AGE = timedelta(hours=6)
+
+
+async def run_pending_reply_recovery_sweep() -> None:
+    """
+    Find every contact whose latest message (any direction) is an unanswered
+    INBOUND one aged between RECOVERY_SWEEP_MIN_AGE and RECOVERY_SWEEP_MAX_AGE,
+    not paused, and (re)schedule the normal reply pipeline for it via
+    message_batcher — the exact same mechanism a live webhook uses, so all the
+    usual behaviors (debounce, presence hold, usage caps, etc.) still apply.
+
+    One aggregate query identifies the candidates (no N+1): per contact, the
+    overall latest message timestamp must equal the latest INBOUND message
+    timestamp (i.e. nothing newer — including no answer — exists) and fall
+    inside the recovery window. Tenants are then batch-loaded once for the
+    whole candidate set (not per contact) to resolve each one's instance
+    token.
+    """
+    now = datetime.now(timezone.utc)
+    window_start = now - RECOVERY_SWEEP_MAX_AGE
+    window_end = now - RECOVERY_SWEEP_MIN_AGE
+
+    async with AsyncSessionLocal() as db:
+        last_at = func.max(Message.created_at)
+        last_inbound_at = func.max(Message.created_at).filter(
+            Message.direction == MessageDirection.INBOUND
+        )
+        candidates_subq = (
+            select(
+                Message.contact_id.label("contact_id"),
+                Message.tenant_id.label("tenant_id"),
+                last_at.label("last_at"),
+            )
+            .group_by(Message.contact_id, Message.tenant_id)
+            .having(last_at == last_inbound_at)
+            .having(last_at >= window_start)
+            .having(last_at <= window_end)
+            .subquery()
+        )
+
+        rows = (
+            await db.execute(
+                select(Contact.id, Contact.tenant_id, Contact.phone)
+                .select_from(candidates_subq)
+                .join(Contact, Contact.id == candidates_subq.c.contact_id)
+                .join(Tenant, Tenant.id == candidates_subq.c.tenant_id)
+                .where(Contact.ai_paused.is_(False), Tenant.is_active.is_(True))
+            )
+        ).all()
+
+        if not rows:
+            logger.info("recovery_sweep_nothing_pending")
+            return
+
+        tenant_ids = {r.tenant_id for r in rows}
+        tenants = (
+            await db.execute(select(Tenant).where(Tenant.id.in_(tenant_ids)))
+        ).scalars().all()
+        tenants_by_id = {t.id: t for t in tenants}
+
+    scheduled = 0
+    skipped_no_instance = 0
+    for contact_id, tenant_id, phone in rows:
+        tenant = tenants_by_id.get(tenant_id)
+        if tenant is None or _tenant_ai_paused(tenant):
+            continue
+        instance_token = _instance_token(tenant)
+        if not instance_token or not phone:
+            skipped_no_instance += 1
+            continue
+
+        async def _work(
+            _tenant=tenant, _contact_id=contact_id, _phone=phone, _instance_token=instance_token
+        ) -> None:
+            await _generate_and_send(
+                tenant=_tenant,
+                contact_id=_contact_id,
+                phone=_phone,
+                instance_token=_instance_token,
+                request_id=None,
+            )
+
+        # Reuses the normal batcher (debounce if enabled, immediate otherwise —
+        # message_batcher.schedule() already reads MESSAGE_BATCHING_ENABLED
+        # itself). No typing_key: there's no live presence signal to attach to
+        # a boot-time sweep.
+        batcher.schedule(contact_id, _work, typing_key=None)
+        scheduled += 1
+
+    logger.info(
+        "recovery_sweep_completed",
+        extra={"scheduled": scheduled, "skipped_no_instance": skipped_no_instance},
+    )
 
 
 async def _resolve_tenant_or_none(db: AsyncSession, slug: str) -> Tenant | None:

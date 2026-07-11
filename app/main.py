@@ -65,6 +65,13 @@ async def lifespan(_app: FastAPI):
     configure_logging()
     start_scheduler()
     await _warn_tenants_missing_webhook_secret()
+    # Post-restart recovery sweep (item 1.8): re-schedule a reply for any
+    # contact whose newest message was INBOUND and never got answered because
+    # the process restarted mid-debounce. Imported here (not at module level)
+    # to keep this file's import surface unchanged outside the lifespan
+    # function, which is the only part of app/main.py in scope for this change.
+    from app.api.v1.routes.webhooks import run_pending_reply_recovery_sweep
+    await run_pending_reply_recovery_sweep()
     try:
         yield
     finally:
