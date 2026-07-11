@@ -116,7 +116,10 @@ async def send_handoff_alert_email(
               name=fn.name, args=dict(fn.args), db=db,
               tenant_id=..., contact_id=..., ...
           )
-      (currently ~line 634-643 in app/services/ai.py). Add immediately
+      (currently ~line 686-698 in app/services/ai.py — check with
+      `grep -n "tool_result = await execute_tool" app/services/ai.py`
+      since exact line numbers drift as ai.py is edited by the other
+      workstream). Add immediately
       after that call, before the `logger.info("ai_tool_executed", ...)`
       block:
           if fn.name == "request_human_handoff" and tool_result.get("success"):
