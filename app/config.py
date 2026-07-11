@@ -43,6 +43,15 @@ class Settings(BaseSettings):
     GEMINI_API_KEY: Optional[str] = None
     DEFAULT_AI_MODEL: str = "gemini-2.5-flash"
     AI_HISTORY_LIMIT: int = 20
+    # Minimum lead time before a slot can be offered/booked for "today" (check_availability
+    # never returns a slot starting sooner than now + this many minutes). This is a default
+    # assumption, NOT confirmed by the product owner — revisit if the clinic ops team wants
+    # a different buffer.
+    MIN_BOOKING_LEAD_MINUTES: int = 30
+    # Retries for a transient Gemini API exception (network blip, 5xx) before giving up on
+    # a reply — separate from the existing "empty candidate" retry (different failure mode).
+    GEMINI_CALL_MAX_RETRIES: int = 2
+    GEMINI_CALL_RETRY_BACKOFF_SECONDS: float = 1.0
 
     # ── Conversation humanization (batching, partitioned replies, typing) ─────
     # These shape how Sofia replies on WhatsApp so it feels human. All in-process
@@ -150,6 +159,18 @@ class Settings(BaseSettings):
     # ── Pagination defaults ──────────────────────────────────────────────────
     DEFAULT_PAGE_LIMIT: int = 50
     MAX_PAGE_LIMIT: int = 200
+
+    # ── AI usage caps (daily, per contact / per tenant) ──────────────────────
+    # OFF by default — this is a safety valve against a runaway conversation or
+    # a misbehaving integration burning Gemini quota/cost, not a finished
+    # product feature. The counters/enforcement code always exists (counts
+    # OUTBOUND messages with ai_model_used set, created today), but nothing
+    # acts on it until AI_USAGE_LIMITS_ENABLED=true is explicitly set — a
+    # business decision on the actual numbers is still pending. The 40/400
+    # defaults below are placeholders for that decision, not validated limits.
+    AI_USAGE_LIMITS_ENABLED: bool = False
+    AI_USAGE_CAP_PER_CONTACT_DAILY: int = 40
+    AI_USAGE_CAP_PER_TENANT_DAILY: int = 400
 
     # extra="ignore": tolerate stray/legacy env vars instead of crashing on boot.
     model_config = {

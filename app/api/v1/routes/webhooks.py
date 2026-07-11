@@ -20,13 +20,15 @@ FastAPI BackgroundTask to avoid blocking UAZAPI's retry logic.
 
 import asyncio
 import base64
+import hmac
 import logging
 import time
 import uuid
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 
 from fastapi import APIRouter, BackgroundTasks, Request, status
-from sqlalchemy import desc, select
+from sqlalchemy import desc, func, select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import settings
@@ -40,6 +42,7 @@ from app.services import humanizer
 from app.services import message_batcher as batcher
 from app.services import whatsapp as wa_service
 from app.services import whatsapp_instance as wi
+from app.services.ai_tools import _clinic_tz
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/webhooks", tags=["Webhooks"])
@@ -47,6 +50,34 @@ router = APIRouter(prefix="/webhooks", tags=["Webhooks"])
 
 def _instance_token(tenant: Tenant) -> str | None:
     return (tenant.settings or {}).get("whatsapp", {}).get("token")
+
+
+def _tenant_ai_paused(tenant: Tenant) -> bool:
+    """
+    Tenant-wide AI pause flag (item 1.7 — AI usage caps), stored in
+    tenant.settings (no new column needed). Distinct from Contact.ai_paused,
+    which pauses a single conversation; this stops Sofia's auto-replies for
+    the WHOLE clinic. Only ever set by _ai_usage_caps_allow_reply when the
+    daily tenant-wide AI usage cap is exceeded (feature is OFF by default —
+    see AI_USAGE_LIMITS_ENABLED in app/config.py).
+    """
+    return bool((tenant.settings or {}).get("ai_paused"))
+
+
+def _webhook_secret_valid(expected_secret: str | None, provided_secret: str | None) -> bool:
+    """
+    Pure: fail CLOSED. A tenant with NO webhook_secret stored must reject every
+    request (previously it accepted ANY request unauthenticated in that case —
+    see item 1.6 of the robustness plan) — only a tenant WITH a stored secret
+    that matches the one provided is valid. Comparison is constant-time
+    (hmac.compare_digest) so response timing can't be used to brute-force the
+    secret. The caller must log the same WARNING and return the same opaque
+    200 response for both "no secret configured" and "wrong secret" so an
+    attacker can't distinguish the two from the outside.
+    """
+    if not expected_secret:
+        return False
+    return hmac.compare_digest(str(provided_secret or ""), str(expected_secret))
 
 
 @router.post("/whatsapp/{tenant_slug}", status_code=status.HTTP_200_OK)
@@ -102,10 +133,18 @@ async def whatsapp_webhook(
         return {"received": True}
 
     expected_secret = (tenant.settings or {}).get("whatsapp", {}).get("webhook_secret")
-    if expected_secret and provided_secret != expected_secret:
+    if not _webhook_secret_valid(expected_secret, provided_secret):
+        # Same WARNING + same opaque 200 response whether the tenant has NO
+        # secret stored or the wrong one was provided — never let the caller
+        # distinguish the two (see _webhook_secret_valid docstring).
         logger.warning(
             "webhook_invalid_secret",
-            extra={"request_id": rid, "tenant_id": str(tenant.id), "event": event},
+            extra={
+                "request_id": rid,
+                "tenant_id": str(tenant.id),
+                "event": event,
+                "has_expected_secret": bool(expected_secret),
+            },
         )
         return {"received": True}
 
@@ -130,10 +169,6 @@ async def whatsapp_webhook(
         )
         return {"received": True}
 
-    # Ignore our own outbound / API-sent messages (avoid loops)
-    if data.get("fromMe") or data.get("wasSentByApi"):
-        return {"received": True}
-
     # Ignore groups when the tenant has ignore_groups enabled (default: True)
     chatid = str(data.get("chatid") or "")
     is_group = bool(data.get("isGroup")) or chatid.endswith("@g.us")
@@ -143,6 +178,29 @@ async def whatsapp_webhook(
             "webhook_group_skipped",
             extra={"request_id": rid, "tenant_id": str(tenant.id), "chatid": chatid},
         )
+        return {"received": True}
+
+    from_me = bool(data.get("fromMe"))
+    sent_by_api = bool(data.get("wasSentByApi"))
+
+    if from_me and sent_by_api:
+        # Our own automated send — already persisted by _save_outbound() at send
+        # time. Ignore here to avoid double-persisting it and avoid reply loops.
+        return {"received": True}
+
+    if from_me and not sent_by_api:
+        # A human on staff typed directly into WhatsApp (phone app / WhatsApp
+        # Web), not through our API. Persist it as a normal OUTBOUND message so
+        # it shows in the Inbox and so Sofia sees it in history on her next
+        # reply (avoids contradicting what staff already told the patient).
+        # Does NOT generate an AI reply (it's OUTBOUND, never read by
+        # _collect_unanswered) and does NOT auto-pause Sofia — the auto-pause
+        # behavior is a separate, still-pending product decision.
+        logger.info(
+            "webhook_human_outbound_dispatching",
+            extra={"request_id": rid, "tenant_id": str(tenant.id), "tenant_slug": tenant_slug},
+        )
+        background_tasks.add_task(_process_human_outbound_message, tenant, data, rid)
         return {"received": True}
 
     logger.info(
@@ -494,7 +552,20 @@ async def _process_inbound_message(tenant: Tenant, data: dict, request_id: str |
                     media_url=media_url,
                 )
                 db.add(inbound_msg)
-                await db.commit()
+                try:
+                    await db.commit()
+                except IntegrityError:
+                    # Two concurrent deliveries of the same webhook both passed the
+                    # SELECT fast-path above before either committed. The partial
+                    # unique index on (tenant_id, whatsapp_message_id) — see
+                    # migration d4e5f6a7b8c9 — catches the race at the DB level;
+                    # treat it exactly like the SELECT-based duplicate above.
+                    await db.rollback()
+                    logger.info(
+                        "webhook_duplicate_race_skipped",
+                        extra={**log_ctx, "phone": phone, "whatsapp_message_id": message_id},
+                    )
+                    return
 
                 contact_id = contact.id
             except Exception:
@@ -510,6 +581,14 @@ async def _process_inbound_message(tenant: Tenant, data: dict, request_id: str |
 
         if ai_paused:
             logger.info("webhook_ai_paused", extra={**log_ctx, "phone": phone, "contact_id": str(contact_id)})
+            return
+
+        if _tenant_ai_paused(tenant):
+            # Cheap in-memory check (no query) to skip scheduling the batcher
+            # at all once the tenant-wide AI usage cap has already tripped.
+            # The authoritative, up-to-date check (and the cap enforcement
+            # itself) happens in _generate_and_send via _ai_usage_caps_allow_reply.
+            logger.info("webhook_tenant_ai_paused", extra={**log_ctx, "phone": phone})
             return
 
         if not instance_token:
@@ -535,6 +614,173 @@ async def _process_inbound_message(tenant: Tenant, data: dict, request_id: str |
 
     except Exception:
         logger.exception("webhook_processing_error", extra=log_ctx)
+
+
+async def _process_human_outbound_message(
+    tenant: Tenant, data: dict, request_id: str | None
+) -> None:
+    """
+    Persist a message a human on staff sent directly from their own phone /
+    WhatsApp Web (fromMe=true, wasSentByApi=false — NOT one of our automated
+    sends, those are wasSentByApi=true and handled at the call site instead).
+
+    Saved as a plain OUTBOUND Message (no ai_model_used — this didn't come from
+    Sofia) so it shows up in the Inbox and so Sofia sees it in history on her
+    next reply, instead of contradicting what staff already told the patient.
+
+    Deliberately does NOT:
+      - Trigger AI generation (it's OUTBOUND; _collect_unanswered only reads
+        INBOUND messages, so this can never feed the batcher/generate_reply).
+      - Auto-pause Sofia for this contact — that's a separate, still-pending
+        product decision (not this item's scope).
+
+    `chatid` (not `sender_pn`) is used to resolve the contact: for a fromMe
+    message, `sender_pn`/`sender` describe OUR OWN connected number, while
+    `chatid` is always the other side of the conversation — the patient.
+    """
+    log_ctx = {"request_id": request_id, "tenant_id": str(tenant.id)}
+    try:
+        chatid = str(data.get("chatid") or "")
+        sender_pn = str(data.get("sender_pn") or "")
+        sender = str(data.get("sender") or "")
+        phone = _phone_from_jid(chatid or sender_pn or sender)
+        message_id: str = str(data.get("messageid") or data.get("id") or "")
+        text = (data.get("text") or "").strip()
+        media_kind = _uazapi_media_kind(data.get("messageType", ""))
+
+        if not phone:
+            logger.info("webhook_human_outbound_no_phone", extra=log_ctx)
+            return
+        if not text and media_kind is None:
+            logger.info("webhook_human_outbound_empty_ignored", extra={**log_ctx, "phone": phone})
+            return
+
+        async with AsyncSessionLocal() as db:
+            try:
+                # Idempotency fast-path (same approach as inbound; item 1.5 adds
+                # a real unique constraint + IntegrityError handling on top).
+                if message_id:
+                    dup = await db.scalar(
+                        select(Message.id).where(
+                            Message.tenant_id == tenant.id,
+                            Message.whatsapp_message_id == message_id,
+                        )
+                    )
+                    if dup is not None:
+                        logger.info(
+                            "webhook_human_outbound_duplicate_skipped",
+                            extra={**log_ctx, "phone": phone, "whatsapp_message_id": message_id},
+                        )
+                        return
+
+                contact = await _find_or_create_contact(db, tenant, phone, push_name="")
+
+                db.add(
+                    Message(
+                        tenant_id=tenant.id,
+                        contact_id=contact.id,
+                        direction=MessageDirection.OUTBOUND,
+                        channel=MessageChannel.WHATSAPP,
+                        content=text,
+                        whatsapp_message_id=message_id or None,
+                        media_type=media_kind,
+                    )
+                )
+                try:
+                    await db.commit()
+                except IntegrityError:
+                    # Same race as the inbound path — see migration d4e5f6a7b8c9.
+                    await db.rollback()
+                    logger.info(
+                        "webhook_human_outbound_duplicate_race_skipped",
+                        extra={**log_ctx, "phone": phone, "whatsapp_message_id": message_id},
+                    )
+                    return
+                logger.info(
+                    "webhook_human_outbound_saved",
+                    extra={**log_ctx, "phone": phone, "contact_id": str(contact.id)},
+                )
+            except Exception:
+                await db.rollback()
+                raise
+    except Exception:
+        logger.exception("webhook_human_outbound_processing_error", extra=log_ctx)
+
+
+async def _ai_usage_caps_allow_reply(
+    db: AsyncSession, tenant: Tenant, contact: Contact, log_ctx: dict
+) -> bool:
+    """
+    Optional daily AI-reply caps (item 1.7 of the robustness plan) — a safety
+    valve against a runaway conversation or a misbehaving integration burning
+    Gemini quota/cost. OFF by default (AI_USAGE_LIMITS_ENABLED=false): this
+    function is then a pure no-op that returns True WITHOUT touching the DB,
+    so there is zero behavior/perf change while the feature is disabled.
+
+    Counts today's OUTBOUND messages with ai_model_used set (i.e. actual AI
+    replies, not staff/human ones — see item 1.4), scoped to the clinic's
+    calendar day in its own timezone. Never silently drops a reply: when a cap
+    is hit, the corresponding pause is applied (same mechanism a manual
+    handoff uses) so the patient is never left both unanswered AND with no
+    internal trace of why.
+
+    Returns False when the reply must NOT be generated for this turn (a cap
+    was hit and the pause was applied) — the caller must return without
+    calling generate_reply.
+    """
+    if not settings.AI_USAGE_LIMITS_ENABLED:
+        return True
+
+    tz = _clinic_tz(tenant.settings or {})
+    day_start_local = datetime.now(tz).replace(hour=0, minute=0, second=0, microsecond=0)
+    day_start_utc = day_start_local.astimezone(timezone.utc)
+
+    def _ai_replies_since(contact_id: uuid.UUID | None):
+        stmt = select(func.count(Message.id)).where(
+            Message.tenant_id == tenant.id,
+            Message.direction == MessageDirection.OUTBOUND,
+            Message.ai_model_used.is_not(None),
+            Message.created_at >= day_start_utc,
+        )
+        if contact_id is not None:
+            stmt = stmt.where(Message.contact_id == contact_id)
+        return stmt
+
+    # ── Per-contact cap ────────────────────────────────────────────────────
+    contact_count = await db.scalar(_ai_replies_since(contact.id)) or 0
+    if contact_count >= settings.AI_USAGE_CAP_PER_CONTACT_DAILY:
+        if not contact.ai_paused:
+            contact.ai_paused = True
+            await db.commit()
+        logger.warning(
+            "ai_usage_cap_contact_exceeded",
+            extra={
+                **log_ctx,
+                "reason": "ai_usage_cap_contact",
+                "count": contact_count,
+                "cap": settings.AI_USAGE_CAP_PER_CONTACT_DAILY,
+            },
+        )
+        return False
+
+    # ── Per-tenant (whole clinic) cap ──────────────────────────────────────
+    tenant_count = await db.scalar(_ai_replies_since(None)) or 0
+    if tenant_count >= settings.AI_USAGE_CAP_PER_TENANT_DAILY:
+        if not _tenant_ai_paused(tenant):
+            tenant.settings = {**(tenant.settings or {}), "ai_paused": True}
+            await db.commit()
+        logger.error(
+            "ai_usage_cap_tenant_exceeded",
+            extra={
+                **log_ctx,
+                "reason": "ai_usage_cap_tenant",
+                "count": tenant_count,
+                "cap": settings.AI_USAGE_CAP_PER_TENANT_DAILY,
+            },
+        )
+        return False
+
+    return True
 
 
 async def _generate_and_send(
@@ -568,6 +814,12 @@ async def _generate_and_send(
                 logger.info("webhook_ai_paused_late", extra=log_ctx)
                 return
 
+            if not await _ai_usage_caps_allow_reply(db, tenant, contact, log_ctx):
+                # A cap was hit and the corresponding pause was already applied
+                # + logged inside _ai_usage_caps_allow_reply. No-op when
+                # AI_USAGE_LIMITS_ENABLED=false (the default).
+                return
+
             unanswered = await _collect_unanswered(db, tenant.id, contact_id)
             if not unanswered:
                 logger.info("webhook_nothing_to_answer", extra=log_ctx)
@@ -594,6 +846,16 @@ async def _generate_and_send(
             # yet — only once we actually commit to sending (below), so a reply
             # that gets superseded never marks its burst answered.
             newest_answered = max(m.created_at for m in unanswered)
+        except ai_service.AIGenerationError:
+            # Every Gemini attempt failed for this turn (already logged at ERROR
+            # inside generate_reply, which triggers the existing email alert).
+            # Stay silent on purpose: no fallback text is sent (would break
+            # Sofia's human persona) and the "answered" watermark is NOT
+            # advanced, so the patient's question is retried on their next
+            # message or picked up by the post-restart recovery sweep.
+            await db.rollback()
+            logger.warning("ai_generation_failed_burst_left_unanswered", extra=log_ctx)
+            return
         except Exception:
             await db.rollback()
             raise
@@ -741,6 +1003,112 @@ async def _collect_unanswered(
 
     result = await db.execute(stmt)
     return list(result.scalars().all())
+
+
+# ── Post-restart recovery sweep (item 1.8) ───────────────────────────────────
+# If the server restarts while a patient's message is sitting in the debounce
+# window (8-20s), the inbound message is already persisted (Phase 1 already
+# committed) but nothing survives the restart to fire the reply — the pending
+# asyncio timer in message_batcher is in-process state and is lost. If the
+# patient doesn't write again, they're never answered. This sweep runs ONCE at
+# startup (see app/main.py lifespan) and re-schedules a reply for every
+# contact whose newest message is INBOUND and old enough to be safely "stuck"
+# (not one that arrived seconds ago and is still inside a live debounce
+# window elsewhere) but not so old it would ressuscitate a dead conversation.
+RECOVERY_SWEEP_MIN_AGE = timedelta(minutes=2)
+RECOVERY_SWEEP_MAX_AGE = timedelta(hours=6)
+
+
+async def run_pending_reply_recovery_sweep() -> None:
+    """
+    Find every contact whose latest message (any direction) is an unanswered
+    INBOUND one aged between RECOVERY_SWEEP_MIN_AGE and RECOVERY_SWEEP_MAX_AGE,
+    not paused, and (re)schedule the normal reply pipeline for it via
+    message_batcher — the exact same mechanism a live webhook uses, so all the
+    usual behaviors (debounce, presence hold, usage caps, etc.) still apply.
+
+    One aggregate query identifies the candidates (no N+1): per contact, the
+    overall latest message timestamp must equal the latest INBOUND message
+    timestamp (i.e. nothing newer — including no answer — exists) and fall
+    inside the recovery window. Tenants are then batch-loaded once for the
+    whole candidate set (not per contact) to resolve each one's instance
+    token.
+    """
+    now = datetime.now(timezone.utc)
+    window_start = now - RECOVERY_SWEEP_MAX_AGE
+    window_end = now - RECOVERY_SWEEP_MIN_AGE
+
+    async with AsyncSessionLocal() as db:
+        last_at = func.max(Message.created_at)
+        last_inbound_at = func.max(Message.created_at).filter(
+            Message.direction == MessageDirection.INBOUND
+        )
+        candidates_subq = (
+            select(
+                Message.contact_id.label("contact_id"),
+                Message.tenant_id.label("tenant_id"),
+                last_at.label("last_at"),
+            )
+            .group_by(Message.contact_id, Message.tenant_id)
+            .having(last_at == last_inbound_at)
+            .having(last_at >= window_start)
+            .having(last_at <= window_end)
+            .subquery()
+        )
+
+        rows = (
+            await db.execute(
+                select(Contact.id, Contact.tenant_id, Contact.phone)
+                .select_from(candidates_subq)
+                .join(Contact, Contact.id == candidates_subq.c.contact_id)
+                .join(Tenant, Tenant.id == candidates_subq.c.tenant_id)
+                .where(Contact.ai_paused.is_(False), Tenant.is_active.is_(True))
+            )
+        ).all()
+
+        if not rows:
+            logger.info("recovery_sweep_nothing_pending")
+            return
+
+        tenant_ids = {r.tenant_id for r in rows}
+        tenants = (
+            await db.execute(select(Tenant).where(Tenant.id.in_(tenant_ids)))
+        ).scalars().all()
+        tenants_by_id = {t.id: t for t in tenants}
+
+    scheduled = 0
+    skipped_no_instance = 0
+    for contact_id, tenant_id, phone in rows:
+        tenant = tenants_by_id.get(tenant_id)
+        if tenant is None or _tenant_ai_paused(tenant):
+            continue
+        instance_token = _instance_token(tenant)
+        if not instance_token or not phone:
+            skipped_no_instance += 1
+            continue
+
+        async def _work(
+            _tenant=tenant, _contact_id=contact_id, _phone=phone, _instance_token=instance_token
+        ) -> None:
+            await _generate_and_send(
+                tenant=_tenant,
+                contact_id=_contact_id,
+                phone=_phone,
+                instance_token=_instance_token,
+                request_id=None,
+            )
+
+        # Reuses the normal batcher (debounce if enabled, immediate otherwise —
+        # message_batcher.schedule() already reads MESSAGE_BATCHING_ENABLED
+        # itself). No typing_key: there's no live presence signal to attach to
+        # a boot-time sweep.
+        batcher.schedule(contact_id, _work, typing_key=None)
+        scheduled += 1
+
+    logger.info(
+        "recovery_sweep_completed",
+        extra={"scheduled": scheduled, "skipped_no_instance": skipped_no_instance},
+    )
 
 
 async def _resolve_tenant_or_none(db: AsyncSession, slug: str) -> Tenant | None:

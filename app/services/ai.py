@@ -30,6 +30,7 @@ tenant.ai_config shape:
 }
 """
 
+import asyncio
 import logging
 import uuid
 from datetime import datetime, timedelta, timezone
@@ -49,6 +50,20 @@ from app.services.ai_tools import CLINIC_TOOLS, execute_tool, _clinic_tz, _fmt_l
 logger = logging.getLogger(__name__)
 
 MAX_TOOL_ITERATIONS = 8
+
+
+class AIGenerationError(Exception):
+    """
+    Raised when every attempt at calling Gemini for a turn fails (see
+    GEMINI_CALL_MAX_RETRIES). The caller (webhooks._generate_and_send) MUST
+    catch this and stay silent — no reply is sent and the "answered"
+    watermark is NOT advanced, so the patient's original question is picked
+    back up on their next message (or by the post-restart recovery sweep,
+    item 1.8) instead of Sofia sending a robotic "system error" message that
+    would (a) break her human persona and (b) wrongly mark the burst as
+    answered, permanently losing the patient's question if they never
+    write again.
+    """
 
 DEFAULT_SYSTEM_PROMPT = """\
 Você é Sofia, a secretária desta clínica.
@@ -188,6 +203,12 @@ conseguir resolver a mesma coisa, chame request_human_handoff com o motivo e res
 despedida curta e acolhedora avisando que alguém da equipe já continua por ali (algo como "vou te \
 passar pra alguém da equipe, já já continuam por aqui 😊"). Não tente resolver de novo nem prometa \
 prazo específico, isso já fica com a equipe.
+- Se o paciente confirmar presença em um agendamento (responder afirmativamente a um lembrete que \
+perguntou algo como "posso confirmar sua presença?", com "sim"/"confirmado"/"vou sim"/"pode confirmar", \
+ou avisar espontaneamente que vai comparecer), chame confirm_appointment com o id do agendamento — use \
+o id do "Próximo agendamento" do CONTEXTO DO PACIENTE se houver só um; se houver dúvida sobre qual \
+agendamento, use get_upcoming_appointments antes. NUNCA chame confirm_appointment sem o paciente ter \
+confirmado de fato nesta conversa — não presuma nem invente confirmação que ele não deu.
 
 TÉCNICA DE VENDAS E QUEBRA DE OBJEÇÃO:
 Venda sempre consultiva, nunca insistente: o objetivo é ajudar o paciente a decidir bem, não \
@@ -418,6 +439,55 @@ async def generate_followup_message(tenant: Tenant, contact: Contact) -> str | N
         return None
 
 
+async def _generate_content_with_retry(
+    client: genai.Client,
+    model: str,
+    contents: list,
+    config: "types.GenerateContentConfig",
+    tenant: Tenant,
+    contact: Contact,
+    iteration: int,
+):
+    """
+    Call Gemini's generate_content with a short retry for TRANSIENT exceptions
+    (network blips, 5xx) — distinct from the "empty candidate" retry below,
+    which handles a different failure mode (a successful call that returned no
+    usable content). GEMINI_CALL_MAX_RETRIES/GEMINI_CALL_RETRY_BACKOFF_SECONDS
+    control the attempt count/backoff (app/config.py).
+
+    Raises AIGenerationError when every attempt fails — the caller must NOT
+    invent a robotic fallback reply for this (see AIGenerationError docstring).
+    """
+    max_retries = settings.GEMINI_CALL_MAX_RETRIES
+    last_exc: Exception | None = None
+    for attempt in range(max_retries + 1):
+        try:
+            return await client.aio.models.generate_content(
+                model=model,
+                contents=contents,
+                config=config,
+            )
+        except Exception as exc:
+            last_exc = exc
+            is_last_attempt = attempt >= max_retries
+            log_ctx = {
+                "iteration": iteration,
+                "attempt": attempt,
+                "model": model,
+                "tenant_id": str(tenant.id),
+                "contact_id": str(contact.id),
+            }
+            if is_last_attempt:
+                logger.error("gemini_call_exhausted", extra=log_ctx, exc_info=True)
+            else:
+                logger.warning("gemini_call_failed_will_retry", extra=log_ctx, exc_info=True)
+                await asyncio.sleep(settings.GEMINI_CALL_RETRY_BACKOFF_SECONDS * (attempt + 1))
+
+    raise AIGenerationError(
+        f"Gemini generate_content failed after {max_retries + 1} attempt(s)"
+    ) from last_exc
+
+
 async def generate_reply(
     tenant: Tenant,
     contact: Contact,
@@ -441,6 +511,12 @@ async def generate_reply(
 
     Returns:
         (reply_text, model_name)
+
+    Raises:
+        AIGenerationError: every attempt at a Gemini generate_content call for
+            this turn failed (see GEMINI_CALL_MAX_RETRIES). The caller must
+            NOT send a fallback reply nor mark the burst answered — see the
+            exception's docstring.
     """
     # Normalize media to a list so a burst of several audios/images is handled
     # uniformly. A single tuple (bytes, mime) is still accepted for convenience.
@@ -553,23 +629,7 @@ async def generate_reply(
             },
         )
 
-        try:
-            response = await client.aio.models.generate_content(
-                model=model,
-                contents=contents,
-                config=config,
-            )
-        except Exception:
-            logger.exception(
-                "gemini_call_failed",
-                extra={
-                    "iteration": iteration,
-                    "model": model,
-                    "tenant_id": str(tenant.id),
-                    "contact_id": str(contact.id),
-                },
-            )
-            return "Desculpe, estou com um problema técnico no momento. Tente novamente em instantes.", model
+        response = await _generate_content_with_retry(client, model, contents, config, tenant, contact, iteration)
 
         candidate = response.candidates[0]
         response_content = candidate.content
