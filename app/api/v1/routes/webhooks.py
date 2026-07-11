@@ -594,6 +594,16 @@ async def _generate_and_send(
             # yet — only once we actually commit to sending (below), so a reply
             # that gets superseded never marks its burst answered.
             newest_answered = max(m.created_at for m in unanswered)
+        except ai_service.AIGenerationError:
+            # Every Gemini attempt failed for this turn (already logged at ERROR
+            # inside generate_reply, which triggers the existing email alert).
+            # Stay silent on purpose: no fallback text is sent (would break
+            # Sofia's human persona) and the "answered" watermark is NOT
+            # advanced, so the patient's question is retried on their next
+            # message or picked up by the post-restart recovery sweep.
+            await db.rollback()
+            logger.warning("ai_generation_failed_burst_left_unanswered", extra=log_ctx)
+            return
         except Exception:
             await db.rollback()
             raise
