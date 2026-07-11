@@ -20,7 +20,7 @@ from app.models.appointment import Appointment
 from app.models.contact import Contact, ContactStatus
 from app.models.message import Message
 from app.models.tenant import Tenant
-from app.models.user import UserRole
+from app.models.user import User, UserRole
 from app.schemas.contact import ContactRead, ContactReadWithLastMessage, ContactUpdate
 from app.schemas.message import MessageRead, MessageCreate
 from app.services import whatsapp as wa_service
@@ -128,9 +128,9 @@ async def get_contact(
     contact_id: uuid.UUID,
     db: DBSession,
     tenant_id: CurrentTenantId,
-    _: CurrentUser,
+    current_user: CurrentUser,
 ):
-    return await _get_or_404(db, contact_id, tenant_id)
+    return await _get_or_404(db, contact_id, tenant_id, current_user)
 
 
 @router.get("/{contact_id}/messages", response_model=Page[MessageRead])
@@ -138,7 +138,7 @@ async def list_contact_messages(
     contact_id: uuid.UUID,
     db: DBSession,
     tenant_id: CurrentTenantId,
-    _: CurrentUser,
+    current_user: CurrentUser,
     pagination: Annotated[PaginationParams, Depends(pagination_params)],
 ):
     """
@@ -146,7 +146,7 @@ async def list_contact_messages(
     Tenant-scoped — the contact existence is validated under the same tenant
     before any messages are returned.
     """
-    await _get_or_404(db, contact_id, tenant_id)
+    await _get_or_404(db, contact_id, tenant_id, current_user)
 
     where = [Message.tenant_id == tenant_id, Message.contact_id == contact_id]
     total = await db.scalar(select(func.count(Message.id)).where(*where))
@@ -178,7 +178,7 @@ async def send_manual_message(
     if current_user.role not in _WRITE_ROLES:
         raise ForbiddenError("Insufficient permissions.")
 
-    contact = await _get_or_404(db, contact_id, tenant_id)
+    contact = await _get_or_404(db, contact_id, tenant_id, current_user)
 
     # Resolve the clinic's UAZAPI instance token from tenant settings
     tenant = await db.scalar(select(Tenant).where(Tenant.id == tenant_id))
@@ -205,6 +205,11 @@ async def send_manual_message(
         ai_model_used=None,  # Manual message, no AI
     )
     db.add(msg)
+    # A human on the team just took over this conversation — pause Sofia in the
+    # SAME transaction as the send so there's no window for the message_batcher
+    # to fire an automatic reply before a separate PATCH would have paused it
+    # (the frontend also does this PATCH, but it's now redundant, not load-bearing).
+    contact.ai_paused = True
     await db.commit()
     await db.refresh(msg)
     return msg
@@ -221,7 +226,7 @@ async def update_contact(
     if current_user.role not in _WRITE_ROLES:
         raise ForbiddenError("Insufficient permissions.")
 
-    contact = await _get_or_404(db, contact_id, tenant_id)
+    contact = await _get_or_404(db, contact_id, tenant_id, current_user)
     update_data = payload.model_dump(exclude_unset=True)
 
     # A manual stage change (Kanban drag) is flagged so the AI won't auto-regress it.
@@ -252,7 +257,7 @@ async def send_media_message(
     if current_user.role not in _WRITE_ROLES:
         raise ForbiddenError("Insufficient permissions.")
 
-    contact = await _get_or_404(db, contact_id, tenant_id)
+    contact = await _get_or_404(db, contact_id, tenant_id, current_user)
 
     tenant = await db.scalar(select(Tenant).where(Tenant.id == tenant_id))
     instance_token = (tenant.settings or {}).get("whatsapp", {}).get("token")
@@ -294,6 +299,9 @@ async def send_media_message(
         ai_model_used=None,
     )
     db.add(msg)
+    # Same rationale as send_manual_message: pause Sofia server-side, in the same
+    # commit as the send, so the message_batcher can't race an automatic reply.
+    contact.ai_paused = True
     await db.commit()
     await db.refresh(msg)
     return msg
@@ -301,11 +309,40 @@ async def send_media_message(
 
 # ── Helpers ─────────────────────────────────────────────────────────────────
 
-async def _get_or_404(db, contact_id: uuid.UUID, tenant_id: uuid.UUID) -> Contact:
+async def _professional_has_access(
+    db, contact_id: uuid.UUID, tenant_id: uuid.UUID, professional_id: uuid.UUID
+) -> bool:
+    """A `professional` may only access a contact they have an appointment with."""
+    result = await db.execute(
+        select(Appointment.id)
+        .where(
+            Appointment.tenant_id == tenant_id,
+            Appointment.contact_id == contact_id,
+            Appointment.professional_id == professional_id,
+        )
+        .limit(1)
+    )
+    return result.scalar_one_or_none() is not None
+
+
+async def _get_or_404(
+    db,
+    contact_id: uuid.UUID,
+    tenant_id: uuid.UUID,
+    current_user: User | None = None,
+) -> Contact:
     result = await db.execute(
         select(Contact).where(Contact.id == contact_id, Contact.tenant_id == tenant_id)
     )
     contact = result.scalar_one_or_none()
     if contact is None:
         raise NotFoundError("Contact not found.")
+
+    # Same scope rule as list_contacts: a professional only reaches contacts they
+    # have an appointment with. 404 (not 403) so the endpoint doesn't confirm
+    # the contact exists in the clinic to a professional with no relation to it.
+    if current_user is not None and current_user.role == UserRole.PROFESSIONAL:
+        if not await _professional_has_access(db, contact_id, tenant_id, current_user.id):
+            raise NotFoundError("Contact not found.")
+
     return contact
