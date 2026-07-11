@@ -181,6 +181,32 @@ _reschedule_appointment_decl = types.FunctionDeclaration(
     ),
 )
 
+_confirm_appointment_decl = types.FunctionDeclaration(
+    name="confirm_appointment",
+    description=(
+        "Registra que o paciente CONFIRMOU presença em um agendamento existente. "
+        "Use quando ele responder afirmativamente a um lembrete que perguntou algo como "
+        "'posso confirmar sua presença?' (ex.: 'sim', 'confirmado', 'vou sim', 'pode confirmar'), "
+        "ou quando avisar espontaneamente que vai comparecer. "
+        "NUNCA chame esta ferramenta sem o paciente ter confirmado de fato na conversa — "
+        "não presuma nem invente uma confirmação que ele não deu."
+    ),
+    parameters=types.Schema(
+        type=types.Type.OBJECT,
+        properties={
+            "appointment_id": types.Schema(
+                type=types.Type.STRING,
+                description=(
+                    "UUID do agendamento confirmado. Se houver só um 'Próximo agendamento' no "
+                    "CONTEXTO DO PACIENTE, use o id de lá — não chame get_upcoming_appointments "
+                    "à toa."
+                ),
+            ),
+        },
+        required=["appointment_id"],
+    ),
+)
+
 _get_clinic_info_decl = types.FunctionDeclaration(
     name="get_clinic_info",
     description=(
@@ -309,6 +335,7 @@ CLINIC_TOOLS = types.Tool(
         _get_upcoming_appointments_decl,
         _cancel_appointment_decl,
         _reschedule_appointment_decl,
+        _confirm_appointment_decl,
         _get_clinic_info_decl,
         _update_contact_info_decl,
         _list_professionals_decl,
@@ -368,6 +395,9 @@ async def execute_tool(
 
     if name == "cancel_appointment":
         return await _cancel_appointment(db, tenant_id, contact_id, args)
+
+    if name == "confirm_appointment":
+        return await _confirm_appointment(db, tenant_id, contact_id, args)
 
     if name == "reschedule_appointment":
         if per_prof:
@@ -1002,6 +1032,57 @@ async def _cancel_appointment(
         "appointment_id": str(appointment.id),
         "scheduled_at": appointment.scheduled_at.isoformat(),
         "message": "Agendamento cancelado com sucesso.",
+    }
+
+
+async def _confirm_appointment(
+    db: AsyncSession,
+    tenant_id: uuid.UUID,
+    contact_id: uuid.UUID,
+    args: dict,
+) -> dict:
+    """
+    Mark an existing appointment as CONFIRMED — the patient replied to a
+    reminder (or said spontaneously) that they'll attend. tenant_id/contact_id
+    come from context — never from args — so the AI can never confirm another
+    patient's appointment. Does NOT touch crm_stage: confirming attendance is
+    not a funnel event (see app/services/crm.py).
+    """
+    try:
+        appointment_id = uuid.UUID(args["appointment_id"])
+    except (KeyError, ValueError):
+        return {"error": "appointment_id inválido."}
+
+    result = await db.execute(
+        select(Appointment).where(
+            Appointment.id == appointment_id,
+            Appointment.tenant_id == tenant_id,       # tenant scope — IA cannot cross tenants
+            Appointment.contact_id == contact_id,      # contact scope — IA cannot confirm other patients' appointments
+            Appointment.status.in_(
+                [AppointmentStatus.SCHEDULED, AppointmentStatus.CONFIRMED]
+            ),
+        )
+    )
+    appointment = result.scalar_one_or_none()
+
+    if appointment is None:
+        return {"error": "Agendamento não encontrado, cancelado ou já concluído."}
+
+    appointment.status = AppointmentStatus.CONFIRMED
+    await db.flush()
+
+    logger.info(
+        "Appointment confirmed by AI tool: id=%s tenant=%s contact=%s",
+        appointment.id,
+        tenant_id,
+        contact_id,
+    )
+
+    return {
+        "success": True,
+        "appointment_id": str(appointment.id),
+        "status": AppointmentStatus.CONFIRMED,
+        "message": "Presença confirmada com sucesso.",
     }
 
 
