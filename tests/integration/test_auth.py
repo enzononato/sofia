@@ -11,8 +11,6 @@ from __future__ import annotations
 import uuid
 from datetime import datetime, timedelta, timezone
 
-import pytest
-
 from tests.integration.conftest import SeededTenant, login
 
 
@@ -107,26 +105,15 @@ async def test_refresh_token_rotation_and_replay_detection(client, tenant_a: See
     assert replay.json()["error"]["code"] == "token_invalid"
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "REAL BUG found while writing this suite (not a pre-existing invariant "
-        "under test — flagging, not fixing, per scope). "
-        "app/services/tokens.py rotate_refresh_token(): on replay detection it "
-        "calls `_revoke_family(...)` then `await db.flush()` (lines ~96-97) and "
-        "then raises TokenInvalidError. Because the route handler "
-        "(app/api/v1/routes/auth.py refresh(), ~line 182-188) never reaches its "
-        "own `await db.commit()` when that exception propagates, and "
-        "app/database.py get_db()'s except-block calls `await session.rollback()` "
-        "on any exception (lines ~63-68), the family-wide revocation is flushed "
-        "but never committed — it is silently rolled back. Net effect: replaying "
-        "a stolen refresh token returns 401 as expected, but the *sibling* token "
-        "from the same family (the attacker's own still-valid rotated pair) stays "
-        "usable, defeating the 'revoke the whole family' anti-theft guarantee "
-        "documented in that module's own docstring."
-    ),
-)
 async def test_replay_detection_revokes_the_whole_token_family(client, tenant_a: SeededTenant):
+    """
+    Regression test for a real bug found while building this suite: replay
+    detection in tokens.py::rotate_refresh_token() only flushed the family-wide
+    revocation before raising TokenInvalidError, so get_db()'s rollback-on-
+    exception silently discarded it, leaving the attacker's own sibling token
+    valid. Fixed by committing the revocation before raising — see
+    app/services/tokens.py.
+    """
     tokens = await login(client, tenant_a)
     refresh_1 = tokens["refresh_token"]
 

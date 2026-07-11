@@ -92,9 +92,14 @@ async def rotate_refresh_token(
     now = datetime.now(timezone.utc)
 
     if rt.revoked_at is not None:
-        # Replay attack — revoke the whole family for safety
+        # Replay attack — revoke the whole family for safety. This must be
+        # committed here, not just flushed: the caller (POST /auth/refresh)
+        # raises TokenInvalidError right after this, and get_db()'s exception
+        # handler rolls back the session on ANY exception — a flush-only
+        # revocation would be silently discarded, leaving every sibling
+        # token in the family still valid despite the "revoked" log line.
         await _revoke_family(db, rt.family_id, reason="replay_detected")
-        await db.flush()
+        await db.commit()
         logger.warning(
             "refresh_token_replay_detected",
             extra={
