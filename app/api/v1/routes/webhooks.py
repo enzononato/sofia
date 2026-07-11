@@ -24,10 +24,10 @@ import hmac
 import logging
 import time
 import uuid
-from datetime import datetime
+from datetime import datetime, timezone
 
 from fastapi import APIRouter, BackgroundTasks, Request, status
-from sqlalchemy import desc, select
+from sqlalchemy import desc, func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -42,6 +42,7 @@ from app.services import humanizer
 from app.services import message_batcher as batcher
 from app.services import whatsapp as wa_service
 from app.services import whatsapp_instance as wi
+from app.services.ai_tools import _clinic_tz
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/webhooks", tags=["Webhooks"])
@@ -49,6 +50,18 @@ router = APIRouter(prefix="/webhooks", tags=["Webhooks"])
 
 def _instance_token(tenant: Tenant) -> str | None:
     return (tenant.settings or {}).get("whatsapp", {}).get("token")
+
+
+def _tenant_ai_paused(tenant: Tenant) -> bool:
+    """
+    Tenant-wide AI pause flag (item 1.7 — AI usage caps), stored in
+    tenant.settings (no new column needed). Distinct from Contact.ai_paused,
+    which pauses a single conversation; this stops Sofia's auto-replies for
+    the WHOLE clinic. Only ever set by _ai_usage_caps_allow_reply when the
+    daily tenant-wide AI usage cap is exceeded (feature is OFF by default —
+    see AI_USAGE_LIMITS_ENABLED in app/config.py).
+    """
+    return bool((tenant.settings or {}).get("ai_paused"))
 
 
 def _webhook_secret_valid(expected_secret: str | None, provided_secret: str | None) -> bool:
@@ -570,6 +583,14 @@ async def _process_inbound_message(tenant: Tenant, data: dict, request_id: str |
             logger.info("webhook_ai_paused", extra={**log_ctx, "phone": phone, "contact_id": str(contact_id)})
             return
 
+        if _tenant_ai_paused(tenant):
+            # Cheap in-memory check (no query) to skip scheduling the batcher
+            # at all once the tenant-wide AI usage cap has already tripped.
+            # The authoritative, up-to-date check (and the cap enforcement
+            # itself) happens in _generate_and_send via _ai_usage_caps_allow_reply.
+            logger.info("webhook_tenant_ai_paused", extra={**log_ctx, "phone": phone})
+            return
+
         if not instance_token:
             logger.error("webhook_no_instance", extra=log_ctx)
             return
@@ -686,6 +707,82 @@ async def _process_human_outbound_message(
         logger.exception("webhook_human_outbound_processing_error", extra=log_ctx)
 
 
+async def _ai_usage_caps_allow_reply(
+    db: AsyncSession, tenant: Tenant, contact: Contact, log_ctx: dict
+) -> bool:
+    """
+    Optional daily AI-reply caps (item 1.7 of the robustness plan) — a safety
+    valve against a runaway conversation or a misbehaving integration burning
+    Gemini quota/cost. OFF by default (AI_USAGE_LIMITS_ENABLED=false): this
+    function is then a pure no-op that returns True WITHOUT touching the DB,
+    so there is zero behavior/perf change while the feature is disabled.
+
+    Counts today's OUTBOUND messages with ai_model_used set (i.e. actual AI
+    replies, not staff/human ones — see item 1.4), scoped to the clinic's
+    calendar day in its own timezone. Never silently drops a reply: when a cap
+    is hit, the corresponding pause is applied (same mechanism a manual
+    handoff uses) so the patient is never left both unanswered AND with no
+    internal trace of why.
+
+    Returns False when the reply must NOT be generated for this turn (a cap
+    was hit and the pause was applied) — the caller must return without
+    calling generate_reply.
+    """
+    if not settings.AI_USAGE_LIMITS_ENABLED:
+        return True
+
+    tz = _clinic_tz(tenant.settings or {})
+    day_start_local = datetime.now(tz).replace(hour=0, minute=0, second=0, microsecond=0)
+    day_start_utc = day_start_local.astimezone(timezone.utc)
+
+    def _ai_replies_since(contact_id: uuid.UUID | None):
+        stmt = select(func.count(Message.id)).where(
+            Message.tenant_id == tenant.id,
+            Message.direction == MessageDirection.OUTBOUND,
+            Message.ai_model_used.is_not(None),
+            Message.created_at >= day_start_utc,
+        )
+        if contact_id is not None:
+            stmt = stmt.where(Message.contact_id == contact_id)
+        return stmt
+
+    # ── Per-contact cap ────────────────────────────────────────────────────
+    contact_count = await db.scalar(_ai_replies_since(contact.id)) or 0
+    if contact_count >= settings.AI_USAGE_CAP_PER_CONTACT_DAILY:
+        if not contact.ai_paused:
+            contact.ai_paused = True
+            await db.commit()
+        logger.warning(
+            "ai_usage_cap_contact_exceeded",
+            extra={
+                **log_ctx,
+                "reason": "ai_usage_cap_contact",
+                "count": contact_count,
+                "cap": settings.AI_USAGE_CAP_PER_CONTACT_DAILY,
+            },
+        )
+        return False
+
+    # ── Per-tenant (whole clinic) cap ──────────────────────────────────────
+    tenant_count = await db.scalar(_ai_replies_since(None)) or 0
+    if tenant_count >= settings.AI_USAGE_CAP_PER_TENANT_DAILY:
+        if not _tenant_ai_paused(tenant):
+            tenant.settings = {**(tenant.settings or {}), "ai_paused": True}
+            await db.commit()
+        logger.error(
+            "ai_usage_cap_tenant_exceeded",
+            extra={
+                **log_ctx,
+                "reason": "ai_usage_cap_tenant",
+                "count": tenant_count,
+                "cap": settings.AI_USAGE_CAP_PER_TENANT_DAILY,
+            },
+        )
+        return False
+
+    return True
+
+
 async def _generate_and_send(
     tenant: Tenant,
     contact_id: uuid.UUID,
@@ -715,6 +812,12 @@ async def _generate_and_send(
 
             if contact.ai_paused:
                 logger.info("webhook_ai_paused_late", extra=log_ctx)
+                return
+
+            if not await _ai_usage_caps_allow_reply(db, tenant, contact, log_ctx):
+                # A cap was hit and the corresponding pause was already applied
+                # + logged inside _ai_usage_caps_allow_reply. No-op when
+                # AI_USAGE_LIMITS_ENABLED=false (the default).
                 return
 
             unanswered = await _collect_unanswered(db, tenant.id, contact_id)
