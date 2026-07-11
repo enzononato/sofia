@@ -35,12 +35,13 @@ class TenantCreate(TenantBase):
 
 
 class TenantUpdate(BaseModel):
+    # `plan` and `is_active` are intentionally NOT editable here: no UI exposes them
+    # via this endpoint, and allowing them would let an owner self-upgrade their plan
+    # or reactivate a deactivated account without staff intervention.
     name: str | None = Field(None, min_length=2, max_length=255)
     email: EmailStr | None = None
     phone: str | None = None
     address: str | None = None
-    plan: TenantPlan | None = None
-    is_active: bool | None = None
     ai_config: dict[str, Any] | None = None
     settings: dict[str, Any] | None = None
 

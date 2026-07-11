@@ -12,11 +12,21 @@ from app.api.deps import CurrentTenantId, CurrentUser, DBSession
 from app.core.errors import ForbiddenError, NotFoundError
 from app.models.tenant import Tenant
 from app.models.user import UserRole
-from app.schemas.tenant import TenantRead, TenantUpdate
+from app.schemas.tenant import _SENSITIVE_WHATSAPP_KEYS, TenantRead, TenantUpdate
 
 router = APIRouter(prefix="/tenants", tags=["Tenants"])
 
 _WRITE_ROLES = (UserRole.OWNER, UserRole.ADMIN)
+
+# Keys inside settings.whatsapp that only the WhatsApp connect flow
+# (app/api/v1/routes/whatsapp.py) may ever write. `_SENSITIVE_WHATSAPP_KEYS`
+# (imported from schemas/tenant.py, the single source of truth for what's a
+# *secret*) is reused here as-is so the read-side scrub and the write-side
+# block can never drift apart on the secret set. `status`/`instance` are not
+# secrets (TenantRead still returns them — the frontend doesn't currently rely
+# on that, but nothing needs it hidden) yet are still exclusively server-set,
+# so they're blocked on write here without being added to the secret set.
+_SERVER_MANAGED_WHATSAPP_KEYS = _SENSITIVE_WHATSAPP_KEYS | {"status", "instance"}
 
 
 @router.get("/me", response_model=TenantRead)
@@ -54,6 +64,20 @@ async def update_my_tenant(
     # deep so a partial update of `settings.whatsapp` doesn't clobber `webhook_secret`.
     for field, value in payload.model_dump(exclude_unset=True).items():
         if field in ("ai_config", "settings") and isinstance(value, dict):
+            if field == "settings" and isinstance(value.get("whatsapp"), dict):
+                # `whatsapp.token`/`webhook_secret`/`status`/`instance` (and the
+                # legacy api_key/api_url/apikey) are server-managed — only the
+                # WhatsApp connect flow (app/api/v1/routes/whatsapp.py) may set
+                # them. Drop any client-supplied values before merging so a
+                # PATCH /tenants/me can never overwrite them.
+                value = {
+                    **value,
+                    "whatsapp": {
+                        k: v
+                        for k, v in value["whatsapp"].items()
+                        if k not in _SERVER_MANAGED_WHATSAPP_KEYS
+                    },
+                }
             current = getattr(tenant, field) or {}
             merged = _deep_merge(current, value)
             if field == "ai_config":
