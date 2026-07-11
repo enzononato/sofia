@@ -8,6 +8,7 @@ one, or disable it and trigger the jobs externally).
 Jobs:
   - appointment reminders   (every REMINDER_JOB_MINUTES)
   - re-engagement           (every REENGAGE_JOB_HOURS)
+  - paused-handoff alert    (every HANDOFF_ALERT_JOB_MINUTES)
   - Google Calendar reconcile (every REMINDER_JOB_MINUTES, only if GCal configured)
 """
 
@@ -43,6 +44,11 @@ def start_scheduler() -> None:
         hours=settings.REENGAGE_JOB_HOURS,
         id="reengagement", max_instances=1, coalesce=True,
     )
+    _scheduler.add_job(
+        followups.run_paused_alert, "interval",
+        minutes=settings.HANDOFF_ALERT_JOB_MINUTES,
+        id="handoff_paused_alert", max_instances=1, coalesce=True,
+    )
     if gcal.is_configured():
         _scheduler.add_job(
             gcal.run_google_sync_reconcile, "interval",
@@ -55,6 +61,7 @@ def start_scheduler() -> None:
         extra={
             "reminder_minutes": settings.REMINDER_JOB_MINUTES,
             "reengage_hours": settings.REENGAGE_JOB_HOURS,
+            "handoff_alert_minutes": settings.HANDOFF_ALERT_JOB_MINUTES,
             "gcal": gcal.is_configured(),
         },
     )

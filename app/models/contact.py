@@ -85,6 +85,20 @@ class Contact(TenantScopedMixin, Base):
     # Handoff flag: if True, Sofia will ignore inbound messages from this contact
     ai_paused: Mapped[bool] = mapped_column(server_default="false")
 
+    # When the "still waiting for a human" alert was last sent for the CURRENT
+    # pause episode (see app/services/followups.py::run_paused_alert). Reset
+    # semantics are handled by that job itself, by comparing this timestamp to
+    # the contact's latest inbound message rather than clearing the column
+    # elsewhere: if a new inbound message arrives after this timestamp (or the
+    # contact gets un-paused and paused again later with fresh messages), the
+    # job treats it as a brand-new episode and alerts again.
+    #
+    # PENDING MIGRATION: this column does not exist in the DB yet. Another
+    # workstream owns Alembic revisions this week — a migration adding
+    # `contacts.handoff_alerted_at TIMESTAMPTZ NULL` must be created before
+    # this is deployed (see plan summary for details).
+    handoff_alerted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
     # AI conversation history reference (thread_id from OpenAI Assistants, etc.)
     ai_thread_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
 
