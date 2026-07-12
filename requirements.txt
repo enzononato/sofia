@@ -14,9 +14,10 @@ pydantic-settings==2.6.1
 pydantic[email]==2.10.3
 
 # Auth / security
-python-jose[cryptography]==3.3.0
-passlib[bcrypt]==1.7.4
-bcrypt==3.2.2
+PyJWT==2.13.0
+bcrypt==3.2.2  # direct dependency (no longer via passlib); pinned as a deliberate,
+                # conservative choice — validated against existing $2b$ hashes in
+                # the DB, bump intentionally and re-test rather than drift
 
 # AI
 google-genai==1.10.0

@@ -11,22 +11,25 @@ import uuid
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
-from jose import jwt
-from passlib.context import CryptContext
+import bcrypt
+import jwt
 
 from app.config import settings
-
-pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 
 
 # ── Passwords ───────────────────────────────────────────────────────────────
 
 def hash_password(password: str) -> str:
-    return pwd_context.hash(password)
+    hashed = bcrypt.hashpw(password.encode("utf-8"), bcrypt.gensalt())
+    return hashed.decode("utf-8")
 
 
 def verify_password(plain: str, hashed: str) -> bool:
-    return pwd_context.verify(plain, hashed)
+    try:
+        return bcrypt.checkpw(plain.encode("utf-8"), hashed.encode("utf-8"))
+    except (ValueError, TypeError):
+        # Malformed/corrupt hash — never let this become a 500 on login.
+        return False
 
 
 # ── Access JWT (short-lived) ────────────────────────────────────────────────
@@ -50,7 +53,8 @@ def create_access_token(
 
 
 def decode_access_token(token: str) -> dict:
-    """Decode + validate signature + exp. Raises jose.JWTError on any failure."""
+    """Decode + validate signature + exp. Raises jwt.PyJWTError (ExpiredSignatureError /
+    InvalidTokenError, etc.) on any failure."""
     return jwt.decode(token, settings.SECRET_KEY, algorithms=[settings.ALGORITHM])
 
 

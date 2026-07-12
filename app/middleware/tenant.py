@@ -110,17 +110,18 @@ def _err(status_code: int, code: str, message: str, request_id: str | None) -> J
 
 def _extract_tenant_from_jwt(request: Request) -> str | None:
     """Extract tenant_id claim from Bearer token without full auth validation."""
-    from jose import JWTError, jwt as jose_jwt
+    import jwt
+
     auth = request.headers.get("Authorization", "")
     if not auth.startswith("Bearer "):
         return None
     token = auth.removeprefix("Bearer ").strip()
     try:
-        payload = jose_jwt.decode(
+        payload = jwt.decode(
             token, settings.SECRET_KEY, algorithms=[settings.ALGORITHM]
         )
         return payload.get("tenant_id")
-    except JWTError:
+    except jwt.InvalidTokenError:
         return None
 
 

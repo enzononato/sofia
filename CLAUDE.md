@@ -118,7 +118,7 @@ Tailwind is **v3** — shadcn/ui may generate v4 classes, always convert manuall
 
 ## Critical constraints
 
-- `bcrypt==3.2.2` — passlib 1.7.4 is incompatible with bcrypt ≥ 4.0. Do not upgrade bcrypt.
+- `bcrypt==3.2.2` — used directly (via `bcrypt.hashpw`/`bcrypt.checkpw` in `app/core/security.py`, no longer via passlib, which was dropped in favor of PyJWT/direct-bcrypt for both being actively maintained). The pin is now a deliberate, conservative choice validated against the `$2b$...` hashes already in the DB — bump intentionally and re-test rather than let it drift.
 - `httpx==0.28.1` — required by google-genai 1.10. Do not upgrade httpx.
 - Alembic migrations are linear — never create a branch. Always `alembic upgrade head` before creating a new revision.
 - WhatsApp integration uses **UAZAPI** (`UAZAPI_URL` + `UAZAPI_ADMIN_TOKEN`). Each clinic gets its own UAZAPI instance created via the admin token; the per-instance `token` (auth for that clinic's sends) is stored in `tenant.settings["whatsapp"]["token"]` and, like `webhook_secret`, is never returned by the API. UAZAPI can't send custom webhook headers, so the per-tenant secret rides in the webhook URL's `?token=` query param and is validated on receipt. Webhook events subscribed: `messages`, `connection`, `presence`.

@@ -16,9 +16,9 @@ import logging
 import uuid
 from datetime import datetime, timedelta, timezone
 
+import jwt
 from fastapi import APIRouter
 from fastapi.responses import RedirectResponse
-from jose import jwt
 from sqlalchemy import select
 
 from app.api.deps import CurrentTenantId, CurrentUser, DBSession
