@@ -99,6 +99,20 @@ class Contact(TenantScopedMixin, Base):
     # this is deployed (see plan summary for details).
     handoff_alerted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
+    # Temporary auto-pause (item D4 of the robustness plan): set/renewed to
+    # now + HUMAN_TAKEOVER_PAUSE_MINUTES whenever staff reply to this patient
+    # directly from their own phone/WhatsApp Web (fromMe=true,
+    # wasSentByApi=false — see
+    # app/api/v1/routes/webhooks.py::_process_human_outbound_message). While
+    # this is in the future, Sofia skips generating a reply for this contact,
+    # exactly like `ai_paused` — but it EXPIRES ON ITS OWN (no manual
+    # reactivation): once "now" passes this timestamp, Sofia resumes
+    # automatically on the patient's next message. Distinct from `ai_paused`
+    # (permanent, one-way, only staff can un-pause via the Inbox). To inspect
+    # in the DB: `SELECT id, phone, human_takeover_until FROM contacts WHERE
+    # human_takeover_until > now();` lists contacts currently in the window.
+    human_takeover_until: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
     # AI conversation history reference (thread_id from OpenAI Assistants, etc.)
     ai_thread_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
 

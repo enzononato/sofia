@@ -175,6 +175,17 @@ class Settings(BaseSettings):
     AI_USAGE_CAP_PER_CONTACT_DAILY: int = 40
     AI_USAGE_CAP_PER_TENANT_DAILY: int = 400
 
+    # ── Human takeover auto-pause (item D4) ──────────────────────────────────
+    # When staff reply to a patient directly from their own phone/WhatsApp Web
+    # (fromMe=true, wasSentByApi=false — see
+    # app/api/v1/routes/webhooks.py::_process_human_outbound_message), Sofia
+    # auto-pauses herself for that contact for this many minutes so she never
+    # talks over a human who just took the conversation. Each new human
+    # message renews (not stacks) the window; it expires on its own — no
+    # manual reactivation needed, unlike the permanent `Contact.ai_paused`
+    # handoff switch. See `Contact.human_takeover_until`.
+    HUMAN_TAKEOVER_PAUSE_MINUTES: int = 60
+
     # extra="ignore": tolerate stray/legacy env vars instead of crashing on boot.
     model_config = {
         "env_file": ".env",

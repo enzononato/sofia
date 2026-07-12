@@ -27,7 +27,7 @@ import uuid
 from datetime import datetime, timedelta, timezone
 
 from fastapi import APIRouter, BackgroundTasks, Request, status
-from sqlalchemy import desc, func, select
+from sqlalchemy import desc, func, or_, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -63,6 +63,22 @@ def _tenant_ai_paused(tenant: Tenant) -> bool:
     see AI_USAGE_LIMITS_ENABLED in app/config.py).
     """
     return bool((tenant.settings or {}).get("ai_paused"))
+
+
+def _in_human_takeover(contact: Contact) -> bool:
+    """
+    True while a staff member is actively replying to this contact by hand
+    from their own phone/WhatsApp Web (item D4 — see
+    `Contact.human_takeover_until` / `_process_human_outbound_message`).
+
+    Distinct from `contact.ai_paused` (permanent, one-way — only staff
+    un-pause via the Inbox): this window EXPIRES on its own once "now"
+    passes the stored timestamp, with no separate un-pause action needed.
+    Every caller that decides whether to generate an AI reply for a contact
+    must check this alongside `ai_paused`.
+    """
+    until = getattr(contact, "human_takeover_until", None)
+    return until is not None and until > datetime.now(timezone.utc)
 
 
 def _webhook_secret_valid(expected_secret: str | None, provided_secret: str | None) -> bool:
@@ -195,8 +211,9 @@ async def whatsapp_webhook(
         # it shows in the Inbox and so Sofia sees it in history on her next
         # reply (avoids contradicting what staff already told the patient).
         # Does NOT generate an AI reply (it's OUTBOUND, never read by
-        # _collect_unanswered) and does NOT auto-pause Sofia — the auto-pause
-        # behavior is a separate, still-pending product decision.
+        # _collect_unanswered) and ALSO auto-pauses Sofia for this contact for
+        # HUMAN_TAKEOVER_PAUSE_MINUTES (item D4) — see
+        # _process_human_outbound_message / Contact.human_takeover_until.
         logger.info(
             "webhook_human_outbound_dispatching",
             extra={"request_id": rid, "tenant_id": str(tenant.id), "tenant_slug": tenant_slug},
@@ -536,6 +553,7 @@ async def _process_inbound_message(tenant: Tenant, data: dict, request_id: str |
 
                 contact = await _find_or_create_contact(db, tenant, phone, push_name)
                 ai_paused = contact.ai_paused
+                human_takeover = _in_human_takeover(contact)
 
                 if not is_historical:
                     crm.mark_inbound(contact)
@@ -584,6 +602,16 @@ async def _process_inbound_message(tenant: Tenant, data: dict, request_id: str |
             logger.info("webhook_ai_paused", extra={**log_ctx, "phone": phone, "contact_id": str(contact_id)})
             return
 
+        if human_takeover:
+            # A human took over this conversation from their own phone
+            # recently (item D4) — stay quiet until the window expires on its
+            # own; no need to touch the DB again here, just skip scheduling.
+            logger.info(
+                "webhook_human_takeover_active",
+                extra={**log_ctx, "phone": phone, "contact_id": str(contact_id)},
+            )
+            return
+
         if _tenant_ai_paused(tenant):
             # Cheap in-memory check (no query) to skip scheduling the batcher
             # at all once the tenant-wide AI usage cap has already tripped.
@@ -629,11 +657,18 @@ async def _process_human_outbound_message(
     Sofia) so it shows up in the Inbox and so Sofia sees it in history on her
     next reply, instead of contradicting what staff already told the patient.
 
+    Also sets/renews `contact.human_takeover_until` = now +
+    HUMAN_TAKEOVER_PAUSE_MINUTES (item D4) — every new human-typed message
+    RESETS the window (renew, not stack), so Sofia stays quiet on this
+    contact as long as staff keep replying by hand, then resumes on her own
+    once HUMAN_TAKEOVER_PAUSE_MINUTES pass without another one. This is
+    distinct from `contact.ai_paused` (permanent, one-way, only staff
+    reactivate via the Inbox) — see the column's docstring in
+    app/models/contact.py.
+
     Deliberately does NOT:
       - Trigger AI generation (it's OUTBOUND; _collect_unanswered only reads
         INBOUND messages, so this can never feed the batcher/generate_reply).
-      - Auto-pause Sofia for this contact — that's a separate, still-pending
-        product decision (not this item's scope).
 
     `chatid` (not `sender_pn`) is used to resolve the contact: for a fromMe
     message, `sender_pn`/`sender` describe OUR OWN connected number, while
@@ -675,6 +710,14 @@ async def _process_human_outbound_message(
                         return
 
                 contact = await _find_or_create_contact(db, tenant, phone, push_name="")
+
+                # Set/renew the temporary auto-pause window (item D4). Always
+                # overwrite (not "extend if later") so each new human message
+                # RESETS the countdown to a fresh HUMAN_TAKEOVER_PAUSE_MINUTES
+                # from now, rather than accumulating.
+                contact.human_takeover_until = datetime.now(timezone.utc) + timedelta(
+                    minutes=settings.HUMAN_TAKEOVER_PAUSE_MINUTES
+                )
 
                 db.add(
                     Message(
@@ -835,6 +878,14 @@ async def _generate_and_send(
 
             if contact.ai_paused:
                 logger.info("webhook_ai_paused_late", extra=log_ctx)
+                return
+
+            if _in_human_takeover(contact):
+                # A human took over from their own phone since this reply was
+                # scheduled (item D4) — this re-check matters because the
+                # debounce window (several seconds) gives that exactly enough
+                # time to happen between dispatch and here.
+                logger.info("webhook_human_takeover_active_late", extra=log_ctx)
                 return
 
             if not await _ai_usage_caps_allow_reply(db, tenant, contact, log_ctx):
@@ -1046,7 +1097,8 @@ async def run_pending_reply_recovery_sweep() -> None:
     """
     Find every contact whose latest message (any direction) is an unanswered
     INBOUND one aged between RECOVERY_SWEEP_MIN_AGE and RECOVERY_SWEEP_MAX_AGE,
-    not paused, and (re)schedule the normal reply pipeline for it via
+    not paused (neither `ai_paused` nor an active `human_takeover_until` —
+    item D4), and (re)schedule the normal reply pipeline for it via
     message_batcher — the exact same mechanism a live webhook uses, so all the
     usual behaviors (debounce, presence hold, usage caps, etc.) still apply.
 
@@ -1085,7 +1137,18 @@ async def run_pending_reply_recovery_sweep() -> None:
                 .select_from(candidates_subq)
                 .join(Contact, Contact.id == candidates_subq.c.contact_id)
                 .join(Tenant, Tenant.id == candidates_subq.c.tenant_id)
-                .where(Contact.ai_paused.is_(False), Tenant.is_active.is_(True))
+                .where(
+                    Contact.ai_paused.is_(False),
+                    Tenant.is_active.is_(True),
+                    # Item D4: don't resurrect a reply for a contact a human
+                    # is currently handling by hand — same intent as
+                    # `_in_human_takeover`, expressed as a SQL predicate since
+                    # this runs as one aggregate query, not per-contact.
+                    or_(
+                        Contact.human_takeover_until.is_(None),
+                        Contact.human_takeover_until <= now,
+                    ),
+                )
             )
         ).all()
 
