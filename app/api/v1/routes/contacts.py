@@ -13,6 +13,7 @@ from typing import Annotated
 
 from fastapi import APIRouter, Depends, Query
 from sqlalchemy import desc, func, select
+from sqlalchemy.orm import defer
 
 from app.api.deps import CurrentTenantId, CurrentUser, DBSession
 from app.core.errors import ForbiddenError, NotFoundError
@@ -22,7 +23,7 @@ from app.models.message import Message
 from app.models.tenant import Tenant
 from app.models.user import User, UserRole
 from app.schemas.contact import ContactRead, ContactReadWithLastMessage, ContactUpdate
-from app.schemas.message import MessageRead, MessageCreate
+from app.schemas.message import MessageRead, MessageCreate, MessagePreview
 from app.services import whatsapp as wa_service
 from app.schemas.pagination import Page, PageMeta, PaginationParams, pagination_params
 
@@ -82,7 +83,11 @@ async def list_contacts(
     )
     contacts = rows.scalars().all()
 
-    # Batch-fetch the latest message per contact — 2 queries, no N+1
+    # Batch-fetch the latest message per contact — 2 queries, no N+1.
+    # `media_url` is deferred (never SELECTed): the listing only needs a preview
+    # label (MessagePreview carries `media_type`, not the multi-MB base64 data
+    # URI), so there's no reason to pull that column off disk for every contact
+    # on every page load either.
     last_messages: dict[uuid.UUID, Message] = {}
     contact_ids = [c.id for c in contacts]
     if contact_ids:
@@ -99,7 +104,9 @@ async def list_contacts(
             .subquery()
         )
         msgs_result = await db.execute(
-            select(Message).join(
+            select(Message)
+            .options(defer(Message.media_url))
+            .join(
                 latest_subq,
                 (Message.contact_id == latest_subq.c.contact_id)
                 & (Message.created_at == latest_subq.c.max_at),
@@ -112,7 +119,7 @@ async def list_contacts(
             ContactReadWithLastMessage(
                 **ContactRead.model_validate(c).model_dump(),
                 last_message=(
-                    MessageRead.model_validate(last_messages[c.id])
+                    MessagePreview.model_validate(last_messages[c.id])
                     if c.id in last_messages
                     else None
                 ),
