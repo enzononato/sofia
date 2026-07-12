@@ -163,16 +163,28 @@ class Settings(BaseSettings):
     MAX_PAGE_LIMIT: int = 200
 
     # ── AI usage caps (daily, per contact / per tenant) ──────────────────────
-    # OFF by default — this is a safety valve against a runaway conversation or
-    # a misbehaving integration burning Gemini quota/cost, not a finished
-    # product feature. The counters/enforcement code always exists (counts
-    # OUTBOUND messages with ai_model_used set, created today), but nothing
-    # acts on it until AI_USAGE_LIMITS_ENABLED=true is explicitly set — a
-    # business decision on the actual numbers is still pending. The 40/400
-    # defaults below are placeholders for that decision, not validated limits.
-    AI_USAGE_LIMITS_ENABLED: bool = False
+    # ON by default (item D3 of the robustness plan) — a safety valve against a
+    # runaway conversation or a misbehaving integration burning Gemini
+    # quota/cost. The product owner approved the 40/400 defaults below for
+    # production. Counts OUTBOUND messages with ai_model_used set, created
+    # "today" in the clinic's own timezone. When a cap trips, the affected
+    # contact (or the whole tenant) is paused exactly like a manual handoff,
+    # and the team is notified by email — see
+    # app/api/v1/routes/webhooks.py::_ai_usage_caps_allow_reply.
+    AI_USAGE_LIMITS_ENABLED: bool = True
     AI_USAGE_CAP_PER_CONTACT_DAILY: int = 40
     AI_USAGE_CAP_PER_TENANT_DAILY: int = 400
+
+    # ── Human takeover auto-pause (item D4) ──────────────────────────────────
+    # When staff reply to a patient directly from their own phone/WhatsApp Web
+    # (fromMe=true, wasSentByApi=false — see
+    # app/api/v1/routes/webhooks.py::_process_human_outbound_message), Sofia
+    # auto-pauses herself for that contact for this many minutes so she never
+    # talks over a human who just took the conversation. Each new human
+    # message renews (not stacks) the window; it expires on its own — no
+    # manual reactivation needed, unlike the permanent `Contact.ai_paused`
+    # handoff switch. See `Contact.human_takeover_until`.
+    HUMAN_TAKEOVER_PAUSE_MINUTES: int = 60
 
     # extra="ignore": tolerate stray/legacy env vars instead of crashing on boot.
     model_config = {
