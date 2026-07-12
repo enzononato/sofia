@@ -116,6 +116,18 @@ class Contact(TenantScopedMixin, Base):
     # AI conversation history reference (thread_id from OpenAI Assistants, etc.)
     ai_thread_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
 
+    # LGPD — set when the clinic has anonymized this contact on the patient's
+    # request (irreversible). Once set, PII fields have been scrubbed and
+    # `phone` has been cleared so a future WhatsApp message from the same
+    # number is treated as a brand-new contact instead of reattaching to this
+    # (now-anonymous) record. See app/services/privacy.py.
+    anonymized_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    anonymized_by_user_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("users.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+
     # Relationships
     tenant: Mapped["Tenant"] = relationship(back_populates="contacts")
     appointments: Mapped[list["Appointment"]] = relationship(

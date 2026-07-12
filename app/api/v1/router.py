@@ -5,6 +5,7 @@ from app.api.v1.routes import (
     auth,
     contacts,
     integrations,
+    privacy,
     reports,
     services,
     tenants,
@@ -21,6 +22,7 @@ api_router.include_router(whatsapp.router)
 api_router.include_router(services.router)
 api_router.include_router(appointments.router)
 api_router.include_router(contacts.router)
+api_router.include_router(privacy.router)
 api_router.include_router(users.router)
 api_router.include_router(reports.router)
 api_router.include_router(integrations.router)
