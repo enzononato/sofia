@@ -30,6 +30,7 @@ from fastapi import APIRouter, BackgroundTasks, Request, status
 from sqlalchemy import desc, func, or_, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import defer
 
 from app.config import settings
 from app.database import AsyncSessionLocal
@@ -1252,10 +1253,27 @@ async def _fetch_history(
     contact_id: uuid.UUID,
     exclude_ids: set[uuid.UUID],
 ) -> list[Message]:
-    """Latest messages (excluding the current burst), oldest-first for the prompt."""
-    stmt = select(Message).where(
-        Message.tenant_id == tenant_id,
-        Message.contact_id == contact_id,
+    """Latest messages (excluding the current burst), oldest-first for the prompt.
+
+    Deliberately defers `media_url`: this history is only ever consumed by
+    `ai_service.generate_reply()` -> `_history_text_for()`, which represents past
+    media turns as a short text marker (e.g. "[áudio]") built from `media_type`/
+    `content` and NEVER reads `media_url` for historical messages (only the
+    current burst's media, collected separately via `_collect_media`, is sent as
+    bytes to Gemini). A patient's media_url can be a multi-MB base64 data URI, so
+    loading it into every one of the last AI_HISTORY_LIMIT messages on every
+    single turn wasted significant memory/DB I/O for no benefit. `media_url` is
+    left as an unloaded deferred column on the returned Message objects — do not
+    access `.media_url` on any Message coming out of this function (it would
+    trigger an implicit lazy-load on a detached/async session and error).
+    """
+    stmt = (
+        select(Message)
+        .options(defer(Message.media_url))
+        .where(
+            Message.tenant_id == tenant_id,
+            Message.contact_id == contact_id,
+        )
     )
     if exclude_ids:
         stmt = stmt.where(Message.id.not_in(exclude_ids))

@@ -5,7 +5,7 @@ from typing import Any
 from pydantic import BaseModel, EmailStr, Field
 
 from app.models.contact import ContactStatus, CrmStage
-from app.schemas.message import MessageRead
+from app.schemas.message import MessagePreview
 
 
 class ContactBase(BaseModel):
@@ -57,4 +57,4 @@ class ContactRead(ContactBase):
 
 
 class ContactReadWithLastMessage(ContactRead):
-    last_message: MessageRead | None = None
+    last_message: MessagePreview | None = None
