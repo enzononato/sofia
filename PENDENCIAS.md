@@ -1,13 +1,127 @@
 # Pendências antes de abrir o sistema ao público
 
 Lista viva do que falta para ir de "MVP funcional" para "pronto para vender ao público".
-Atualizada após a rodada de correções da Sofia (atendimento) + implementação de alertas.
+Atualizada após a rodada de robustez (Waves 1-2: núcleo do atendimento, hardening da API,
+handoff/follow-ups, testes de integração, tetos de uso de IA, LGPD manual, migração de
+dependências de auth, mitigação de payload de mídia).
 
 Legenda: ✅ feito no código · 🔴 bloqueador · 🟡 recomendado · ⏳ só você pode fazer (painel externo)
 
 ---
 
-## ✅ Resolvido no código nesta rodada
+## ✅ Rodada de robustez (Waves 1-2) — resolvido no código
+
+Executada em duas ondas por subagentes em paralelo (ver `PLANO_EXECUCAO.md` para o
+diagnóstico e priorização original). Tudo abaixo tem testes automatizados cobrindo
+(99 testes puros + 39 de integração contra Postgres real, `tests/integration/`) e passou
+pelo checklist completo (pytest, alembic upgrade/downgrade round-trip, `tsc`, `npm run build`).
+
+**Atendimento da Sofia:**
+- [x] **Horário no passado oferecido/aceito no agendamento** — `check_availability` podia
+  oferecer 09:00 às 16h, e nada impedia criar um agendamento ontem. Agora rejeitado em
+  ambos os modos (capacity e por-profissional), com antecedência mínima configurável
+  (`MIN_BOOKING_LEAD_MINUTES`, default 30 min — **valor não confirmado por você, ver
+  dúvida aberta abaixo**). (`ai_tools.py`)
+- [x] **Falha do Gemini quebrando a persona** — erro na chamada mandava "problema técnico,
+  tente novamente" (tom de robô) e marcava a pergunta como respondida, perdendo-a. Agora
+  tenta de novo silenciosamente e, se falhar tudo, NÃO marca como respondida — a pergunta
+  volta a ser tratada na próxima mensagem do paciente. (`ai.py`)
+- [x] **Tool `confirm_appointment`** — a Sofia agora registra de verdade quando o paciente
+  confirma presença (em resposta a um lembrete ou espontaneamente), em vez de só dizer
+  "confirmado!" sem mudar nada no banco. (`ai_tools.py`)
+- [x] **Mensagens humanas pelo celular ignoradas** — quando alguém da equipe respondia
+  direto no WhatsApp/celular (sem passar pelo sistema), a Sofia nunca via essa mensagem e
+  podia contradizer o que já foi combinado. Agora é gravada no histórico, e a Sofia
+  **pausa automaticamente por 60 minutos** (renovado a cada mensagem humana) para não
+  disputar espaço com o atendente. (`webhooks.py`, `Contact.human_takeover_until`)
+- [x] **Reengajamento genérico** — a mensagem de "sumiu, volta aqui" agora menciona o
+  interesse real do paciente na conversa (quando há sinal claro), em vez de um texto
+  sempre igual. (`ai.py::generate_followup_message`, `followups.py`)
+- [x] **Lembrete de agendamento sempre com o mesmo texto** — 6 variações, sorteadas a
+  cada envio. (`followups.py`)
+- [x] **Tetos de uso diário de IA** — 40 respostas/contato/dia e 400/clínica/dia (valores
+  que você aprovou); ao estourar, pausa e envia alerta por e-mail em vez de continuar
+  respondendo sem limite. **Já LIGADO por padrão** (`AI_USAGE_LIMITS_ENABLED=True`).
+- [x] **Alerta ativo de handoff** — quando a Sofia transfere para humano, agora envia
+  e-mail para `tenant.email` (desativável em Configurações → Follow-ups), além do badge
+  visual. Novo job a cada 10 min alerta se um contato pausado ficar sem resposta humana
+  por tempo demais (`HANDOFF_ALERT_JOB_MINUTES`).
+- [x] **UI com dados fabricados removida** — card "Análise de Presença Online" (85%/+12%
+  inventados) e botão "Sofia Insights" sem função, ambos removidos do painel.
+
+**Segurança e isolamento:**
+- [x] **Webhook do WhatsApp fail-open sem segredo** — agora rejeita por padrão quando o
+  tenant não tem `webhook_secret` gravado (antes aceitava qualquer request). Comparação
+  agora é constant-time. **Tenants antigos sem secret vão parar de receber mensagens até
+  reconectar o WhatsApp** — verifique isso nos logs de boot (WARNING por tenant afetado).
+- [x] **Duplicação de mensagem em entrega concorrente do webhook** — constraint real de
+  unicidade no banco (antes só uma checagem em código, que não protegia contra corrida).
+- [x] **`PATCH /tenants/me` aceitando sobrescrever segredos** — um admin da clínica podia,
+  sem querer ou não, sobrescrever `webhook_secret`/`token` do WhatsApp via um PATCH normal
+  de configurações, ou se auto-promover de plano. Ambos bloqueados agora.
+- [x] **Profissional lendo conversa de paciente de outro profissional** — a listagem já
+  filtrava certo, mas os endpoints de detalhe/mensagens/edição de contato não. Corrigido
+  em todos os pontos.
+- [x] **Bug real de segurança encontrado pelos testes**: a revogação de família de refresh
+  token (proteção contra reuso de token roubado) era descartada por rollback — o token
+  irmão do atacante continuava válido mesmo depois do sistema "detectar" o roubo. Corrigido
+  e coberto por teste de regressão. (`app/services/tokens.py`)
+- [x] **`python-jose`/`passlib` (sem manutenção ativa) substituídos** por `PyJWT` e uso
+  direto de `bcrypt` — sem quebra de compatibilidade (tokens e senhas já existentes
+  continuam válidos, testado manualmente).
+
+**Recuperação e resiliência:**
+- [x] **Mensagem perdida se o servidor reiniciar durante a janela de espera** — uma
+  varredura no boot recupera conversas com mensagem do paciente sem resposta.
+
+**LGPD (manual, conforme sua decisão — sem automação de retenção):**
+- [x] **Exportação de dados do paciente** — `GET /contacts/{id}/export`.
+- [x] **Anonimização/"direito ao esquecimento"** — `POST /contacts/{id}/anonymize`
+  (irreversível; limpa também o telefone, então uma mensagem futura desse número vira um
+  contato novo em vez de reativar o antigo).
+
+**Performance/payload:**
+- [x] **Payload de mídia inflando listagem do Inbox e a memória da IA** — a listagem de
+  contatos e o histórico interno que a IA lê não carregam mais o `media_url` (só a
+  conversa aberta, que precisa de verdade). Medido: ~4,27MB → 883 bytes por contato na
+  listagem, num teste com 2 fotos.
+
+**Testes (novos, cobrindo tudo acima):**
+- [x] Suíte de integração com Postgres real (`tests/integration/`) — isolamento entre
+  clínicas, autenticação, webhook (fail-closed, idempotência, auto-pausa, tetos de IA,
+  `confirm_appointment`), e os dois endpoints de LGPD. 39 testes.
+- [x] Harness de teste E2E manual contra o Gemini real (`scripts/e2e_sofia.py`) — 9
+  cenários prontos (agendamento feliz, data relativa, horário passado, preço/parcelamento
+  não configurados, objeção de preço, pedido de humano, confirmação pós-lembrete, "você é
+  um robô?"). **Só roda manualmente** (`venv\Scripts\python scripts\e2e_sofia.py
+  --scenario <nome>`) — cada rodada com `--all` custa dinheiro real de API, nunca
+  automatize isso. Ainda não foi rodado por completo — recomendo rodar antes do próximo
+  redeploy para validar visualmente as conversas.
+
+> ⚠️ **Tudo isso só chega aos pacientes após o REDEPLOY em produção** (ver bloqueador abaixo).
+
+---
+
+## 🔴 Novo bloqueador desta rodada
+
+- [ ] ⏳ **Rotacionar a `GEMINI_API_KEY` de novo** — durante esta rodada, um agente
+  copiou o `.env` e a chave real acabou aparecendo em texto claro num arquivo de log local
+  de transcript (não foi publicado nem enviado a lugar nenhum, mas rotacionar é a prática
+  seguro). Gere uma nova chave e atualize `.env` local + EasyPanel.
+
+## Dúvidas abertas (defaults assumidos — confirme ou ajuste)
+
+- **Antecedência mínima para agendar no mesmo dia**: adotei 30 minutos
+  (`MIN_BOOKING_LEAD_MINUTES`). Ajuste se quiser outro valor.
+- **Limiar do alerta de "pausado esquecido"**: 30 minutos sem resposta humana após o
+  handoff. Ajuste se quiser outro valor.
+- **E-mail de destino dos alertas** (handoff, teto de IA, "pausado esquecido"): hoje vai
+  para `tenant.email` (o cadastro da própria clínica). Se preferir um e-mail operacional
+  separado, isso precisa de um campo novo.
+
+---
+
+## ✅ Resolvido no código (rodada anterior)
 
 - [x] **Fuso horário / datas erradas** — o default caía em UTC, então clínicas sem
   timezone configurado (o caso real) tinham a data "virando" para o dia seguinte à
@@ -64,6 +178,10 @@ Legenda: ✅ feito no código · 🔴 bloqueador · 🟡 recomendado · ⏳ só 
     (sem aviso de "sou uma IA"), por escolha de negócio. Isso é legítimo, mas **aumenta**
     a importância da política de privacidade e da base legal — não reduz. Reavaliar com
     apoio jurídico antes do lançamento público amplo.
+  - ✅ **Suporte técnico já existe** (rodada de robustez): exportação e anonimização
+    manuais de dados do paciente, sob demanda da equipe da clínica (ver seção acima).
+    Automação de retenção/exclusão automática continua **fora de escopo** por decisão sua
+    — só implementar com um go-ahead explícito.
 
 - [ ] ⏳ **Configurar Google Calendar OAuth no Google Cloud Console**
   - Criar projeto, habilitar Google Calendar API, tela de consentimento OAuth.
@@ -127,9 +245,20 @@ Os 3 itens do [`PLANO_IMPLEMENTACAO.md`](PLANO_IMPLEMENTACAO.md) foram **impleme
 ```bash
 # Backend
 venv\Scripts\python -c "import app.main; print('OK')"
+venv\Scripts\python -m pytest tests/ -q              # suíte pura (rápida, sem DB)
+
+# Backend — suíte de integração (Postgres real, sem custo de Gemini — tudo mockado)
+docker compose up -d
+venv\Scripts\python -m pytest tests/integration -q
 
 # Frontend
 cd frontend
 npx tsc --noEmit
 npm run build
+```
+
+Harness E2E manual contra o Gemini real (custa dinheiro — nunca automatize):
+```bash
+venv\Scripts\python scripts\e2e_sofia.py --list
+venv\Scripts\python scripts\e2e_sofia.py --scenario <nome>
 ```
