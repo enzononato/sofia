@@ -43,6 +43,7 @@ from app.services import message_batcher as batcher
 from app.services import whatsapp as wa_service
 from app.services import whatsapp_instance as wi
 from app.services.ai_tools import _clinic_tz
+from app.services.alerts import send_handoff_alert_email, send_tenant_usage_cap_alert_email
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/webhooks", tags=["Webhooks"])
@@ -752,6 +753,18 @@ async def _ai_usage_caps_allow_reply(
         if not contact.ai_paused:
             contact.ai_paused = True
             await db.commit()
+            # Fire-and-forget email alert — same contract as the manual
+            # handoff alert (never awaited; must not add latency here).
+            # Only fires on the transition into paused (guarded by the `if
+            # not contact.ai_paused` above) so a contact stuck at the cap for
+            # the rest of the day doesn't spam the inbox on every message.
+            asyncio.create_task(
+                send_handoff_alert_email(
+                    tenant,
+                    contact,
+                    "Limite diário de respostas automáticas atingido para este paciente",
+                )
+            )
         logger.warning(
             "ai_usage_cap_contact_exceeded",
             extra={
@@ -769,6 +782,16 @@ async def _ai_usage_caps_allow_reply(
         if not _tenant_ai_paused(tenant):
             tenant.settings = {**(tenant.settings or {}), "ai_paused": True}
             await db.commit()
+            # Same fire-and-forget contract. No single Contact applies to a
+            # tenant-wide cap, so this uses the dedicated tenant-cap email
+            # (see app/services/alerts.py::send_tenant_usage_cap_alert_email
+            # for why it's a separate function rather than widening
+            # send_handoff_alert_email's signature).
+            asyncio.create_task(
+                send_tenant_usage_cap_alert_email(
+                    tenant, tenant_count, settings.AI_USAGE_CAP_PER_TENANT_DAILY
+                )
+            )
         logger.error(
             "ai_usage_cap_tenant_exceeded",
             extra={

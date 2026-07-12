@@ -183,3 +183,58 @@ async def send_handoff_alert_email(
         },
     )
     return sent
+
+
+def _tenant_cap_email_html(clinic_name: str, count: int, cap: int) -> str:
+    return f"""\
+<div style="font-family:Arial,sans-serif;max-width:480px;margin:auto;color:#0f172a">
+  <h2 style="color:#dc2626">Limite diário de respostas automáticas atingido</h2>
+  <p>A <strong>{clinic_name}</strong> atingiu o limite diário de respostas automáticas da Sofia \
+para TODA a clínica ({count} de {cap} permitidas hoje).</p>
+  <p>As respostas automáticas foram pausadas para todos os pacientes até a equipe reativar \
+manualmente, ou até o contador reiniciar amanhã.</p>
+  <p style="font-size:13px">Entre no sistema para atender manualmente os pacientes pendentes, \
+ou ajuste o limite diário se ele estiver baixo demais para o volume da clínica.</p>
+</div>"""
+
+
+async def send_tenant_usage_cap_alert_email(tenant: Tenant, count: int, cap: int) -> bool:
+    """
+    Notify the clinic that the WHOLE-TENANT daily AI-reply cap was exceeded
+    (item D3 of the robustness plan) — Sofia's automatic replies are now
+    paused for every contact in the clinic (`tenant.settings["ai_paused"]`,
+    see app/api/v1/routes/webhooks.py::_tenant_ai_paused) until staff resume
+    them or the daily count resets tomorrow.
+
+    Deliberately a SEPARATE function from `send_handoff_alert_email` rather
+    than widening that one's `contact: Contact` parameter to `Contact | None`:
+    a tenant-wide cap has no single associated patient, and
+    `send_handoff_alert_email` already has two call sites (app/services/ai.py,
+    app/services/followups.py) that always pass a real Contact — keeping it
+    unchanged avoids touching code owned by parallel workstreams. This
+    function intentionally mirrors its shape (same opt-out flag, same
+    never-raises/fire-and-forget contract) so both can be called the same way.
+
+    Respects the same per-tenant opt-out as send_handoff_alert_email
+    (tenant.settings.followups.handoff_alert_email_enabled, default True).
+    Never raises — send_email() already swallows/logs failures — so this is
+    safe to call fire-and-forget (asyncio.create_task) from a hot path.
+    """
+    if not _alert_email_enabled(tenant):
+        logger.info("tenant_usage_cap_alert_email_disabled", extra={"tenant_id": str(tenant.id)})
+        return False
+
+    to = getattr(tenant, "email", None)
+    if not to:
+        logger.warning("tenant_usage_cap_alert_email_no_recipient", extra={"tenant_id": str(tenant.id)})
+        return False
+
+    subject = f"🚨 Limite diário de respostas automáticas atingido — {tenant.name}"
+    html = _tenant_cap_email_html(tenant.name, count, cap)
+
+    sent = await send_email(to=to, subject=subject, html=html)
+    logger.info(
+        "tenant_usage_cap_alert_email_dispatched" if sent else "tenant_usage_cap_alert_email_skipped",
+        extra={"tenant_id": str(tenant.id), "count": count, "cap": cap},
+    )
+    return sent
