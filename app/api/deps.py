@@ -17,9 +17,9 @@ handler emits a consistent error envelope (no raw HTTPException leaks).
 import uuid
 from typing import Annotated
 
+import jwt
 from fastapi import Depends, Request
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
-from jose import ExpiredSignatureError, JWTError
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -75,9 +75,9 @@ async def get_current_user(
 
     try:
         payload = decode_access_token(credentials.credentials)
-    except ExpiredSignatureError:
+    except jwt.ExpiredSignatureError:
         raise TokenExpiredError("Access token has expired.")
-    except JWTError:
+    except jwt.InvalidTokenError:
         raise TokenInvalidError("Access token is invalid.")
 
     try:

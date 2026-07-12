@@ -49,8 +49,9 @@ async def test_login_with_wrong_password_is_401_and_generic(client, tenant_a: Se
 
 
 async def test_expired_access_token_is_rejected(client, tenant_a: SeededTenant):
+    import jwt
+
     from app.config import settings
-    from jose import jwt
 
     expired_payload = {
         "sub": str(tenant_a.owner_id),
