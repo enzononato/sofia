@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect } from "react";
 import { useRouter } from "next/navigation";
 import { useAuthStore } from "@/store/useAuthStore";
 import { Sidebar } from "@/components/dashboard/sidebar";
@@ -20,24 +20,27 @@ export default function DashboardLayout({
   children: React.ReactNode;
 }) {
   const router = useRouter();
-  const { accessToken, fetchTenant } = useAuthStore();
-  const [mounted, setMounted] = useState(false);
+  const { accessToken, fetchTenant, _hasHydrated } = useAuthStore();
 
   useEffect(() => {
-    setMounted(true);
+    // Wait for zustand/persist to finish reading auth-storage from
+    // localStorage before treating a null accessToken as "logged out" —
+    // otherwise a hard reload reads the pre-hydration default and bounces
+    // an already-logged-in user to /login.
+    if (!_hasHydrated) return;
     if (!accessToken) {
       router.push("/login");
     } else {
       fetchTenant();
     }
-  }, [accessToken, router, fetchTenant]);
+  }, [accessToken, _hasHydrated, router, fetchTenant]);
 
   // Prefetch all sidebar routes so first-click navigation is instant
   useEffect(() => {
     DASHBOARD_ROUTES.forEach((route) => router.prefetch(route));
   }, [router]);
 
-  if (!mounted || !accessToken) {
+  if (!_hasHydrated || !accessToken) {
     return (
       <div className="min-h-screen flex items-center justify-center bg-background">
         <div className="animate-pulse flex flex-col items-center gap-4">

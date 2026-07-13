@@ -50,6 +50,12 @@ interface AuthState {
   userRole: 'owner' | 'admin' | 'receptionist' | 'professional' | 'viewer' | null;
   userEmail: string | null;
   tenant: TenantRead | null;
+  // True once zustand/persist has finished reading auth-storage from
+  // localStorage. Consumers (e.g. dashboard/layout.tsx) must wait for this
+  // before treating a null accessToken as "logged out" — otherwise a hard
+  // page reload briefly reads the pre-hydration default and redirects to
+  // /login even though a valid session is sitting in storage.
+  _hasHydrated: boolean;
 }
 
 interface AuthActions {
@@ -57,6 +63,7 @@ interface AuthActions {
   logout: () => Promise<void>;
   fetchTenant: () => Promise<void>;
   setTokens: (accessToken: string, refreshToken: string) => void;
+  setHasHydrated: (hasHydrated: boolean) => void;
 }
 
 export const useAuthStore = create<AuthState & AuthActions>()(
@@ -69,9 +76,14 @@ export const useAuthStore = create<AuthState & AuthActions>()(
       userRole: null,
       userEmail: null,
       tenant: null,
+      _hasHydrated: false,
 
       setTokens: (accessToken: string, refreshToken: string) => {
         set({ accessToken, refreshToken });
+      },
+
+      setHasHydrated: (hasHydrated: boolean) => {
+        set({ _hasHydrated: hasHydrated });
       },
 
       login: async (accessToken: string, refreshToken: string) => {
@@ -129,7 +141,7 @@ export const useAuthStore = create<AuthState & AuthActions>()(
     {
       name: 'auth-storage',
       // Only persist the token and basic info, not the full tenant object which can change
-      partialize: (state) => ({ 
+      partialize: (state) => ({
         accessToken: state.accessToken,
         refreshToken: state.refreshToken,
         tenantId: state.tenantId,
@@ -137,6 +149,9 @@ export const useAuthStore = create<AuthState & AuthActions>()(
         userRole: state.userRole,
         userEmail: state.userEmail
       }),
+      onRehydrateStorage: () => (state) => {
+        state?.setHasHydrated(true);
+      },
     }
   )
 );
