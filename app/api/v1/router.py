@@ -4,6 +4,7 @@ from app.api.v1.routes import (
     appointments,
     auth,
     contacts,
+    events,
     integrations,
     privacy,
     reports,
@@ -27,3 +28,4 @@ api_router.include_router(users.router)
 api_router.include_router(reports.router)
 api_router.include_router(integrations.router)
 api_router.include_router(webhooks.router)
+api_router.include_router(events.router)

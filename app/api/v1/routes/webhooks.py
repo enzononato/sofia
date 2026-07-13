@@ -41,6 +41,7 @@ from app.services import ai as ai_service
 from app.services import crm
 from app.services import humanizer
 from app.services import message_batcher as batcher
+from app.services import realtime
 from app.services import whatsapp as wa_service
 from app.services import whatsapp_instance as wi
 from app.services.ai_tools import _clinic_tz
@@ -592,6 +593,9 @@ async def _process_inbound_message(tenant: Tenant, data: dict, request_id: str |
                 await db.rollback()
                 raise
 
+        if not is_historical:
+            await realtime.publish(tenant.id, {"type": "message", "contact_id": str(contact_id)})
+
         if is_historical:
             logger.info(
                 "webhook_historical_saved",
@@ -995,6 +999,9 @@ async def _save_outbound(
         except Exception:
             await db.rollback()
             logger.exception("outbound_persist_failed", extra={"contact_id": str(contact_id)})
+            return
+
+    await realtime.publish(tenant_id, {"type": "message", "contact_id": str(contact_id)})
 
 
 def _collect_media(messages: list[Message]) -> list[tuple[bytes, str]]:

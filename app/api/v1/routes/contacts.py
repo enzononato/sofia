@@ -24,6 +24,7 @@ from app.models.tenant import Tenant
 from app.models.user import User, UserRole
 from app.schemas.contact import ContactRead, ContactReadWithLastMessage, ContactUpdate
 from app.schemas.message import MessageRead, MessageCreate, MessagePreview
+from app.services import realtime
 from app.services import whatsapp as wa_service
 from app.schemas.pagination import Page, PageMeta, PaginationParams, pagination_params
 
@@ -219,6 +220,7 @@ async def send_manual_message(
     contact.ai_paused = True
     await db.commit()
     await db.refresh(msg)
+    await realtime.publish(tenant_id, {"type": "message", "contact_id": str(contact.id)})
     return msg
 
 
@@ -246,6 +248,7 @@ async def update_contact(
 
     await db.commit()
     await db.refresh(contact)
+    await realtime.publish(tenant_id, {"type": "contact_updated", "contact_id": str(contact.id)})
     return contact
 
 
@@ -311,6 +314,7 @@ async def send_media_message(
     contact.ai_paused = True
     await db.commit()
     await db.refresh(msg)
+    await realtime.publish(tenant_id, {"type": "message", "contact_id": str(contact.id)})
     return msg
 
 

@@ -5,12 +5,17 @@ import { useSearchParams } from "next/navigation";
 import { ContactList } from "./contact-list";
 import { ChatWindow } from "./chat-window";
 import { useContacts } from "@/hooks/useInbox";
+import { useInboxEvents } from "@/hooks/useInboxEvents";
 import { Sparkles } from "lucide-react";
 
 export function InboxLayout() {
   const searchParams = useSearchParams();
   const [selectedContactId, setSelectedContactId] = useState<string | null>(null);
   const { data: contacts, isLoading, error } = useContacts();
+  // Real-time updates (Wave 4) — one shared SSE connection for the whole
+  // Inbox session; layered on top of useContacts/useMessages' permanent
+  // polling, never a replacement for it.
+  useInboxEvents();
 
   // Deep-link support: /dashboard/inbox?contact=<id> (e.g. from the Patients
   // page) opens straight into that conversation once the list has loaded.

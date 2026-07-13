@@ -44,6 +44,12 @@ _PUBLIC_PATHS = {
     "/api/v1/auth/login",           # tenant resolved internally from email lookup
     "/api/v1/auth/refresh",         # tenant resolved from the refresh token row
     "/api/v1/auth/accept-invite",   # tenant resolved from the invitation token
+    # EXACT path only (not a shared prefix) — /api/v1/events/ticket must keep
+    # requiring normal header-based auth. EventSource can't send custom
+    # headers, so this route authenticates via a ?ticket= query param instead
+    # and resolves/revalidates tenant+user itself — see
+    # app/api/v1/routes/events.py::get_sse_context.
+    "/api/v1/events/stream",
 }
 
 # Path prefixes that bypass middleware (tenant resolved internally by handlers)

@@ -1,8 +1,14 @@
 import axios from 'axios';
 import { useAuthStore } from '@/store/useAuthStore';
 
+// Exported so callers that can't use the `api` instance directly — e.g. the
+// SSE hook, which needs an absolute URL for `new EventSource(...)` rather
+// than axios's `baseURL` config — can build a matching URL without
+// duplicating this fallback string.
+export const API_BASE_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000/api/v1';
+
 const api = axios.create({
-  baseURL: process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000/api/v1',
+  baseURL: API_BASE_URL,
   headers: {
     'Content-Type': 'application/json',
   },
@@ -77,7 +83,7 @@ api.interceptors.response.use(
       
       try {
         const { data } = await axios.post(
-          `${process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000/api/v1'}/auth/refresh`,
+          `${API_BASE_URL}/auth/refresh`,
           { refresh_token: refreshToken }
         );
         

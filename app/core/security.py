@@ -38,8 +38,17 @@ def create_access_token(
     subject: Any,
     tenant_id: uuid.UUID,
     extra: dict | None = None,
+    expires_minutes: int | None = None,
 ) -> str:
-    expire = datetime.now(timezone.utc) + timedelta(minutes=settings.ACCESS_TOKEN_EXPIRE_MINUTES)
+    """
+    `expires_minutes` overrides the default ACCESS_TOKEN_EXPIRE_MINUTES TTL —
+    used by the SSE ticket endpoint (app/api/v1/routes/events.py) to mint a
+    much shorter-lived token via `extra={"typ": "sse"}` without duplicating
+    this payload-building logic. Existing callers passing neither `extra` nor
+    `expires_minutes` see no behavior change.
+    """
+    ttl_minutes = expires_minutes if expires_minutes is not None else settings.ACCESS_TOKEN_EXPIRE_MINUTES
+    expire = datetime.now(timezone.utc) + timedelta(minutes=ttl_minutes)
     payload = {
         "sub": str(subject),
         "tenant_id": str(tenant_id),

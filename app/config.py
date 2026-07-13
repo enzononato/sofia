@@ -133,6 +133,16 @@ class Settings(BaseSettings):
     RATE_LIMIT_LOGIN: str = "10/minute"            # auth/login
     RATE_LIMIT_SIGNUP: str = "5/hour"              # auth/signup
     RATE_LIMIT_REFRESH: str = "30/minute"          # auth/refresh
+    RATE_LIMIT_SSE_TICKET: str = "30/minute"       # events/ticket
+
+    # ── Real-time Inbox via SSE (Wave 4) ─────────────────────────────────────
+    # Short-lived ticket TTL for opening the SSE stream — see
+    # app/api/v1/routes/events.py's module docstring for why EventSource can't
+    # use the normal Bearer+X-Tenant-ID header auth. Long enough that the
+    # browser's native EventSource auto-reconnect (same URL, same ticket)
+    # usually still works across a transient network blip; short enough to
+    # bound exposure if the ticket leaks into an access/proxy log.
+    SSE_TICKET_EXPIRE_MINUTES: int = 10
 
     # ── Logging ──────────────────────────────────────────────────────────────
     LOG_LEVEL: str = "INFO"

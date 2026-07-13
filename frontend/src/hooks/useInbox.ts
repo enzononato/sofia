@@ -52,8 +52,12 @@ export function useContacts() {
       const response = await api.get<{ data: Contact[], meta: any }>("/contacts");
       return response.data.data;
     },
-    staleTime: 5 * 1000,
-    refetchInterval: 10 * 1000,
+    // Wave 4: SSE (see useInboxEvents) now invalidates this query the instant
+    // a real event happens — this interval is a permanent safety net (not
+    // gated on "is SSE healthy"), which is why it can be this much longer
+    // than before (was 5s/10s).
+    staleTime: 30 * 1000,
+    refetchInterval: 60 * 1000,
     refetchIntervalInBackground: false,
   });
 }
@@ -81,13 +85,15 @@ export function useMessages(contactId: string | null) {
       return response.data.data;
     },
     enabled: !!contactId,
-    // Was 3s/5s — widened moderately to cut redundant re-fetches of the whole
-    // (media-bearing) page while the conversation is idle; still feels
-    // near-real-time for an active chat. See CLAUDE.md Batch 2B notes: a
-    // dedicated incremental (`created_after`) fetch or a media-on-demand
-    // endpoint would cut this further but is deliberately out of scope here.
-    staleTime: 6 * 1000,
-    refetchInterval: 9 * 1000,
+    // Wave 4: widened again (was 6s/9s) now that SSE (useInboxEvents)
+    // invalidates this query instantly on a real new message — this interval
+    // is a permanent safety net, not the primary update path, so it can
+    // afford to be long. See CLAUDE.md Batch 2B notes for the earlier
+    // media-payload rationale (still applies): a dedicated incremental
+    // (`created_after`) fetch or a media-on-demand endpoint would cut this
+    // further but is deliberately out of scope here.
+    staleTime: 30 * 1000,
+    refetchInterval: 45 * 1000,
     refetchIntervalInBackground: false,
   });
 }
