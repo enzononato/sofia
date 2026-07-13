@@ -6,6 +6,7 @@ import { ptBR } from "date-fns/locale";
 import { Button } from "@/components/ui/button";
 import { useAppointments, useServices, type Appointment } from "@/hooks/useCalendar";
 import { useContacts } from "@/hooks/useInbox";
+import { useTeamMembers } from "@/hooks/useTeam";
 import { DailyTimeline } from "./daily-timeline";
 import { AppointmentModal } from "./appointment-modal";
 import { GoogleCalendarButton } from "./google-calendar-button";
@@ -16,6 +17,7 @@ export function CalendarLayout() {
   const [date, setDate] = useState<Date>(new Date());
   const [modalOpen, setModalOpen] = useState(false);
   const [editingAppt, setEditingAppt] = useState<Appointment | null>(null);
+  const [selectedProfessionalId, setSelectedProfessionalId] = useState<string>("");
 
   const openNew = () => { setEditingAppt(null); setModalOpen(true); };
   const openEdit = (appt: Appointment) => { setEditingAppt(appt); setModalOpen(true); };
@@ -24,9 +26,17 @@ export function CalendarLayout() {
   const dateTo = endOfDay(date).toISOString();
 
   // Fetch data
-  const { data: appointments, isLoading: isLoadingAppts } = useAppointments(dateFrom, dateTo);
+  const { data: appointments, isLoading: isLoadingAppts } = useAppointments(dateFrom, dateTo, selectedProfessionalId || undefined);
   const { data: contacts, isLoading: isLoadingContacts } = useContacts();
   const { data: services, isLoading: isLoadingServices } = useServices();
+  const { data: team, isLoading: isLoadingTeam } = useTeamMembers();
+
+  // Anyone active can be linked to an appointment as `professional_id` (the
+  // backend only checks tenant membership, not role — see
+  // `_assert_user_belongs_to_tenant` in app/api/v1/routes/appointments.py), so
+  // this mirrors the exact same filter already used in appointment-modal.tsx's
+  // `attendingTeam` for the professional picker in the create/edit form.
+  const attendingTeam = (team || []).filter((u) => u.is_active);
 
   const isLoading = isLoadingAppts || isLoadingContacts || isLoadingServices;
 
@@ -194,6 +204,18 @@ export function CalendarLayout() {
                 Ir para Hoje
               </Button>
             )}
+            <select
+              aria-label="Filtrar por profissional"
+              value={selectedProfessionalId}
+              onChange={(e) => setSelectedProfessionalId(e.target.value)}
+              disabled={isLoadingTeam}
+              className="h-8 rounded-full px-3 text-xs border border-white/10 bg-white/5 hover:bg-white/10 text-foreground disabled:opacity-50 cursor-pointer appearance-none bg-[url('data:image/svg+xml,%3Csvg_xmlns=%22http://www.w3.org/2000/svg%22_fill=%22none%22_viewBox=%220_0_24_24%22_stroke=%22%23cbc3d7%22%3E%3Cpath_stroke-linecap=%22round%22_stroke-linejoin=%22round%22_stroke-width=%222%22_d=%22M19_9l-7_7-7-7%22%3E%3C/path%3E%3C/svg%3E')] bg-no-repeat bg-[right_0.5rem_center] bg-[length:1rem] pr-7"
+            >
+              <option value="" className="bg-background">Todos os profissionais</option>
+              {attendingTeam.map((u) => (
+                <option key={u.id} value={u.id} className="bg-background">{u.full_name}</option>
+              ))}
+            </select>
             <GoogleCalendarButton />
             <Button size="sm" onClick={openNew} className="h-8 rounded-full px-4 cursor-pointer bg-primary text-primary-foreground hover:brightness-110 transition-all font-semibold text-xs shadow-md shadow-primary/20">
               <Plus className="mr-1.5 h-4 w-4" /> Novo agendamento
@@ -209,6 +231,7 @@ export function CalendarLayout() {
             services={services || []}
             isLoading={isLoading}
             onSelect={openEdit}
+            professionalId={selectedProfessionalId || undefined}
           />
         </div>
       </div>

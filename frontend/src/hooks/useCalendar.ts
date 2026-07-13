@@ -77,9 +77,9 @@ export function useUpdateAppointment() {
   });
 }
 
-export function useAppointments(dateFrom: string, dateTo: string) {
+export function useAppointments(dateFrom: string, dateTo: string, professionalId?: string) {
   return useQuery({
-    queryKey: ["appointments", dateFrom, dateTo],
+    queryKey: ["appointments", dateFrom, dateTo, professionalId],
     queryFn: async () => {
       // The API expects date_from and date_to as query params
       const response = await api.get<Page<Appointment>>("/appointments", {
@@ -87,6 +87,7 @@ export function useAppointments(dateFrom: string, dateTo: string) {
           date_from: dateFrom,
           date_to: dateTo,
           limit: 100, // Reasonable limit for a single day
+          ...(professionalId ? { professional_id: professionalId } : {}),
         },
       });
       return response.data.data;
