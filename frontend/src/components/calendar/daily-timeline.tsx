@@ -1,9 +1,10 @@
 "use client";
 
 import { useMemo } from "react";
-import { format, differenceInMinutes, startOfDay, addHours, isToday } from "date-fns";
+import { format, differenceInMinutes, startOfDay, addHours, isToday, getISODay } from "date-fns";
 import { Appointment, Service } from "@/hooks/useCalendar";
 import { Contact } from "@/hooks/useInbox";
+import { useUserDetail } from "@/hooks/useTeam";
 import { cn } from "@/lib/utils";
 import { Clock, User, CalendarOff } from "lucide-react";
 
@@ -14,13 +15,66 @@ interface DailyTimelineProps {
   services: Service[];
   isLoading: boolean;
   onSelect?: (appt: Appointment) => void;
+  /** When set (a specific professional, not "Todos"), shades hours outside their work_hours. */
+  professionalId?: string;
 }
 
 const START_HOUR = 7;
 const END_HOUR = 19;
 const ROW_HEIGHT = 72; // pixels per hour
 
-export function DailyTimeline({ date, appointments, contacts, services, isLoading, onSelect }: DailyTimelineProps) {
+/** "HH:MM" or "HH:MM:SS" → minutes since midnight. */
+function timeToMinutes(t: string): number {
+  const [h, m] = t.split(":");
+  return parseInt(h, 10) * 60 + (m ? parseInt(m, 10) : 0);
+}
+
+export function DailyTimeline({ date, appointments, contacts, services, isLoading, onSelect, professionalId }: DailyTimelineProps) {
+  // Only fetched when a specific professional is selected (useUserDetail is
+  // disabled without an id) — the "Todos" case never triggers this request.
+  const { data: professionalDetail, isLoading: isLoadingWorkHours } = useUserDetail(professionalId);
+
+  // Segments of the visible [START_HOUR, END_HOUR] window that fall OUTSIDE
+  // the selected professional's work_hours for the weekday of `date`, in
+  // minutes relative to START_HOUR (same coordinate space as topPos below).
+  // No fallback to clinic-wide hours here on purpose — that behaviour already
+  // lives server-side (`_professional_work_blocks` in app/services/ai_tools.py);
+  // the frontend only mirrors whatever useUserDetail returns.
+  const offHoursSegments = useMemo(() => {
+    if (!professionalId || isLoadingWorkHours) return [];
+    const workHours = professionalDetail?.work_hours || [];
+    const isoWeekday = getISODay(date);
+    const dayBlocks = workHours.filter((b) => b.weekday === isoWeekday);
+
+    const windowStart = START_HOUR * 60;
+    const windowEnd = END_HOUR * 60;
+
+    if (dayBlocks.length === 0) {
+      // No work_hours registered for this weekday at all → treat as a full day off.
+      return [{ start: 0, length: windowEnd - windowStart }];
+    }
+
+    const working = dayBlocks
+      .map((b) => ({
+        start: Math.max(timeToMinutes(b.start_time), windowStart),
+        end: Math.min(timeToMinutes(b.end_time), windowEnd),
+      }))
+      .filter((b) => b.end > b.start)
+      .sort((a, b) => a.start - b.start);
+
+    const segments: { start: number; length: number }[] = [];
+    let cursor = windowStart;
+    for (const block of working) {
+      if (block.start > cursor) {
+        segments.push({ start: cursor - windowStart, length: block.start - cursor });
+      }
+      cursor = Math.max(cursor, block.end);
+    }
+    if (cursor < windowEnd) {
+      segments.push({ start: cursor - windowStart, length: windowEnd - cursor });
+    }
+    return segments;
+  }, [professionalId, isLoadingWorkHours, professionalDetail, date]);
   const hours = useMemo(() => {
     const arr = [];
     const baseDate = startOfDay(date);
@@ -107,6 +161,22 @@ export function DailyTimeline({ date, appointments, contacts, services, isLoadin
                 <div className="absolute top-1/2 left-0 w-full border-t border-dashed border-white/5"></div>
               </div>
             </div>
+          ))}
+
+          {/* Out-of-hours shading for the selected professional (skipped for "Todos") */}
+          {professionalId && isLoadingWorkHours && (
+            <div className="absolute top-0 left-16 lg:left-20 right-0 bottom-0 pointer-events-none animate-pulse bg-muted/20" />
+          )}
+          {professionalId && !isLoadingWorkHours && offHoursSegments.map((seg, i) => (
+            <div
+              key={i}
+              className="absolute left-16 lg:left-20 right-0 pointer-events-none bg-muted-foreground/10"
+              style={{
+                top: `${(seg.start / 60) * ROW_HEIGHT}px`,
+                height: `${(seg.length / 60) * ROW_HEIGHT}px`,
+              }}
+              title="Fora do expediente deste profissional"
+            />
           ))}
 
           {/* "Now" line — violet with a time pill (matches Stitch mockup) */}
