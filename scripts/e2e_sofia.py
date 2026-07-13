@@ -486,8 +486,22 @@ SCENARIOS: dict[str, Scenario] = {
 # DB setup / teardown
 # ---------------------------------------------------------------------------
 
-async def setup_tenant() -> tuple[uuid.UUID, dict[str, uuid.UUID]]:
+async def setup_tenant(multi_agent: bool = False) -> tuple[uuid.UUID, dict[str, uuid.UUID]]:
     slug = f"e2e-sofia-{uuid.uuid4().hex[:10]}"
+    ai_config = {
+        "model": settings.DEFAULT_AI_MODEL,
+        "temperature": 0.7,
+        "max_output_tokens": 1024,
+        "multimodal_enabled": False,
+        "scheduling_mode": "capacity",
+    }
+    if multi_agent:
+        # Per-tenant override — see app.services.ai.multi_agent_enabled_for.
+        # Routes this test tenant's replies through
+        # app/services/agents/orchestrator.py (Router + Booking/Sales/Handoff)
+        # instead of the legacy single-agent path, without touching the
+        # global AI_MULTI_AGENT_ENABLED default.
+        ai_config["multi_agent_enabled"] = True
     async with AsyncSessionLocal() as db:
         tenant = Tenant(
             name="Espaço Beleza Viva (E2E TEST)",
@@ -495,13 +509,7 @@ async def setup_tenant() -> tuple[uuid.UUID, dict[str, uuid.UUID]]:
             email="e2e-sofia-test@example.invalid",
             phone="1140028922",
             is_active=True,
-            ai_config={
-                "model": settings.DEFAULT_AI_MODEL,
-                "temperature": 0.7,
-                "max_output_tokens": 1024,
-                "multimodal_enabled": False,
-                "scheduling_mode": "capacity",
-            },
+            ai_config=ai_config,
             settings={
                 "schedule": {
                     "timezone": "America/Sao_Paulo",
@@ -849,6 +857,15 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         help="Pula a confirmação interativa do --all. Use com cautela — ainda assim gasta dinheiro real.",
     )
     p.add_argument("--out-dir", default=str(DEFAULT_OUT_DIR), help="Diretório onde os transcripts são gravados.")
+    p.add_argument(
+        "--multi-agent", action="store_true",
+        help=(
+            "Roda os cenários com a arquitetura multi-agente da Wave 3 (Router + "
+            "Booking/Sales/Handoff, app/services/agents/) em vez do agente único "
+            "legado — liga tenant.ai_config['multi_agent_enabled'] só no tenant "
+            "de teste, não mexe na flag global AI_MULTI_AGENT_ENABLED."
+        ),
+    )
     return p
 
 
@@ -874,6 +891,7 @@ async def _amain(args: argparse.Namespace) -> int:
 
     total_turns = sum(len(SCENARIOS[k].turns) for k in keys)
     print(f"\nCenários selecionados: {', '.join(keys)}")
+    print(f"Arquitetura: {'multi-agente (Wave 3)' if args.multi_agent else 'agente único (legado)'}")
     print(f"Banco: {_mask_db_url(settings.DATABASE_URL)}")
     print(
         f"Total de turnos = chamadas reais ao Gemini (mínimo — retries/forced-final podem somar mais): "
@@ -899,7 +917,7 @@ async def _amain(args: argparse.Namespace) -> int:
     tenant_id: Optional[uuid.UUID] = None
     generated: list[Path] = []
     try:
-        tenant_id, service_ids = await setup_tenant()
+        tenant_id, service_ids = await setup_tenant(multi_agent=args.multi_agent)
         print(f"[setup] tenant de teste criado: {tenant_id}")
         for key in keys:
             try:

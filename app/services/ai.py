@@ -410,6 +410,52 @@ def _annotate_history(
     return result
 
 
+def build_conversation_contents(
+    tenant: Tenant,
+    history: list[Message],
+    new_message: str,
+    media_items: list[tuple[bytes, str]],
+) -> list["types.Content"]:
+    """
+    Build the Gemini `contents` list (annotated history + current turn) —
+    shared by the legacy single-agent path AND the multi-agent orchestrator
+    (app/services/agents/orchestrator.py), so both see conversation history
+    identically (same stale-block time markers, same media-as-text-marker
+    handling for past turns). Extracted from generate_reply()'s body; no
+    behavior change.
+    """
+    tz = _clinic_tz(tenant.settings or {})
+    now_local = datetime.now(timezone.utc).astimezone(tz)
+
+    usable: list[tuple[Message, str, datetime | None]] = []
+    for msg in history:
+        text_repr = _history_text_for(msg)
+        if not text_repr:
+            continue
+        created = getattr(msg, "created_at", None)
+        local = created.astimezone(tz) if created is not None else None
+        usable.append((msg, text_repr, local))
+
+    contents: list[types.Content] = [
+        types.Content(role=role, parts=[types.Part(text=text_repr)])
+        for role, text_repr in _annotate_history(usable, now_local, tz)
+    ]
+
+    current_parts: list[types.Part] = []
+    for media_bytes, mime_type in media_items:
+        current_parts.append(
+            types.Part(inline_data=types.Blob(data=media_bytes, mime_type=_normalize_mime(mime_type)))
+        )
+    if new_message:
+        current_parts.append(types.Part(text=new_message))
+    if not current_parts:
+        # Defensive: never send an empty user turn
+        current_parts.append(types.Part(text="(mensagem vazia)"))
+    contents.append(types.Content(role="user", parts=current_parts))
+
+    return contents
+
+
 async def generate_followup_message(
     tenant: Tenant,
     contact: Contact,
@@ -541,7 +587,7 @@ async def _generate_content_with_retry(
     ) from last_exc
 
 
-async def generate_reply(
+async def _legacy_generate_reply(
     tenant: Tenant,
     contact: Contact,
     new_message: str,
@@ -550,6 +596,12 @@ async def generate_reply(
     media: tuple[bytes, str] | list[tuple[bytes, str]] | None = None,
 ) -> tuple[str, str]:
     """
+    Single-agent path (pre-Wave-3): one big prompt + all 12 tools declared,
+    one tool-calling loop. This is the function generate_reply() used to be,
+    verbatim — renamed so the multi-agent path (app/services/agents/orchestrator.py)
+    can be dispatched to instead when AI_MULTI_AGENT_ENABLED (or the tenant
+    override) is on. See generate_reply() below for the dispatcher.
+
     Generate an AI reply using Gemini with function calling support.
 
     Args:
@@ -609,51 +661,10 @@ async def generate_reply(
         },
     )
 
-    # Build conversation history. Past media turns are represented as a short
-    # text marker (e.g. "[áudio enviado]") because we don't re-send the bytes
-    # for old turns — only the current turn carries inline media.
-    #
-    # The raw history carries NO time information, so the model cannot tell a
-    # message from 5 minutes ago from one 5 days ago — which made Sofia treat an
-    # old appointment/thread as if it were still live. We inject a compact time
-    # marker onto the first history message and onto any message that opens a new
-    # day or resumes after a long gap, so the model can see when the conversation
-    # jumped in time. Same-session messages stay clean (no marker).
-    tz = _clinic_tz(tenant.settings or {})
-    now_local = datetime.now(timezone.utc).astimezone(tz)
-
-    # Pre-collect usable messages with their local timestamps so we can look at
-    # both the previous AND the next message to bracket each "stale block".
-    usable: list[tuple[Message, str, datetime | None]] = []
-    for msg in history:
-        text_repr = _history_text_for(msg)
-        if not text_repr:
-            # Skip messages with no usable text — Part(text=None/"") is rejected
-            # by the Gemini API with INVALID_ARGUMENT.
-            continue
-        created = getattr(msg, "created_at", None)
-        local = created.astimezone(tz) if created is not None else None
-        usable.append((msg, text_repr, local))
-
-    contents: list[types.Content] = [
-        types.Content(role=role, parts=[types.Part(text=text_repr)])
-        for role, text_repr in _annotate_history(usable, now_local, tz)
-    ]
-
-    # Current user turn — multimodal if media is present. ALL media items from
-    # the burst are attached (e.g. two voice notes in a row), each as its own
-    # inline_data part, so Gemini "hears"/"sees" every one — not just the last.
-    current_parts: list[types.Part] = []
-    for media_bytes, mime_type in media_items:
-        current_parts.append(
-            types.Part(inline_data=types.Blob(data=media_bytes, mime_type=_normalize_mime(mime_type)))
-        )
-    if new_message:
-        current_parts.append(types.Part(text=new_message))
-    if not current_parts:
-        # Defensive: never send an empty user turn
-        current_parts.append(types.Part(text="(mensagem vazia)"))
-    contents.append(types.Content(role="user", parts=current_parts))
+    # Build conversation history + current turn (shared helper — see its
+    # docstring for why: the multi-agent orchestrator needs the exact same
+    # history-annotation behavior).
+    contents = build_conversation_contents(tenant, history, new_message, media_items)
 
     config = types.GenerateContentConfig(
         system_instruction=system_prompt,
@@ -834,3 +845,43 @@ async def generate_reply(
         )
 
     return "Desculpe, não consegui processar sua solicitação no momento. Tente novamente.", model
+
+
+def multi_agent_enabled_for(tenant: Tenant) -> bool:
+    """
+    Per-tenant override (tenant.ai_config["multi_agent_enabled"]: bool) takes
+    precedence over the global AI_MULTI_AGENT_ENABLED flag when explicitly
+    set — lets 1-2 pilot clinics canary the Wave 3 multi-agent architecture
+    before it becomes the global default. See app/services/agents/ for the
+    implementation and the approved plan
+    (drifting-tickling-creek.md) for the rationale.
+    """
+    override = (tenant.ai_config or {}).get("multi_agent_enabled")
+    return override if isinstance(override, bool) else settings.AI_MULTI_AGENT_ENABLED
+
+
+async def generate_reply(
+    tenant: Tenant,
+    contact: Contact,
+    new_message: str,
+    history: list[Message],
+    db: AsyncSession,
+    media: tuple[bytes, str] | list[tuple[bytes, str]] | None = None,
+) -> tuple[str, str]:
+    """
+    Generate Sofia's reply for this turn. Dispatches to the multi-agent
+    orchestrator (app/services/agents/orchestrator.py) when
+    multi_agent_enabled_for(tenant) is True, else to the original
+    single-agent path (_legacy_generate_reply, above) — same contract either
+    way: (reply_text, model_name), raises AIGenerationError on total failure.
+
+    Imports the orchestrator lazily (inside this function, not at module
+    top) — it imports back from this module (_generate_content_with_retry),
+    so a top-level import here would be circular. Also means the multi-agent
+    code never loads into memory for tenants that never enable the flag.
+    """
+    if multi_agent_enabled_for(tenant):
+        from app.services.agents import orchestrator
+
+        return await orchestrator.generate_reply(tenant, contact, new_message, history, db, media)
+    return await _legacy_generate_reply(tenant, contact, new_message, history, db, media)

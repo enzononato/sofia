@@ -50,13 +50,18 @@ DEFAULT_STAGE_OVERLAYS: dict[Stage, str] = {
     Stage.IMMINENT_APPOINTMENT: (
         "O paciente TEM um agendamento confirmado nas próximas 48 horas.\n"
         "- É provável que esteja entrando em contato sobre isso (confirmar, remarcar ou cancelar).\n"
-        "- Use get_upcoming_appointments para ver os detalhes antes de responder.\n"
-        "- Se ele quiser remarcar, use reschedule_appointment (não cancela e cria de novo)."
+        "- Os detalhes desse agendamento (dia/hora/id) já estão no CONTEXTO DO PACIENTE — use-os "
+        "em vez de perguntar de novo.\n"
+        "- Se ele quiser mexer nesse agendamento e isso não for algo que você resolve "
+        "diretamente por aqui, é papel de quem organiza os horários — encaminhe com naturalidade, "
+        "sem prometer que você mesma vai remarcar/cancelar se não for sua parte."
     ),
     Stage.POST_APPOINTMENT: (
         "O paciente teve um atendimento nas últimas 48 horas.\n"
         "- Demonstre interesse em saber como foi.\n"
-        "- Se for serviço recorrente (ex: limpeza, manutenção), ofereça já agendar o próximo.\n"
+        "- Se for serviço recorrente (ex: limpeza, manutenção), é natural sugerir já deixar o "
+        "próximo encaminhado — se agendar não for algo que você resolve diretamente por aqui, "
+        "plante a ideia e deixe o próximo passo dele continuar o assunto.\n"
         "- Não force vendas — escute primeiro."
     ),
     Stage.ACTIVE_PATIENT: (

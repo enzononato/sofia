@@ -186,6 +186,15 @@ class Settings(BaseSettings):
     # handoff switch. See `Contact.human_takeover_until`.
     HUMAN_TAKEOVER_PAUSE_MINUTES: int = 60
 
+    # ── Wave 3: multi-agent Sofia (Router + Booking + Sales + Handoff) ───────
+    # OFF by default — a prompt this hardened by real-conversation validation
+    # deserves a feature flag, not a hard cutover. A tenant can override this
+    # independently via `tenant.ai_config["multi_agent_enabled"]` (bool) for
+    # canarying to 1-2 pilot clinics before flipping the global default — see
+    # app/services/ai.py::multi_agent_enabled_for and
+    # app/services/agents/orchestrator.py.
+    AI_MULTI_AGENT_ENABLED: bool = False
+
     # extra="ignore": tolerate stray/legacy env vars instead of crashing on boot.
     model_config = {
         "env_file": ".env",
