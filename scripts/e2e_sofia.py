@@ -34,18 +34,19 @@ What it does:
      failed, or were interrupted — never leaves data in the shared DB.
 
 Nothing here mocks Gemini. Tool-call and conversation-stage capture use
-process-local monkeypatches of app.services.ai.execute_tool and
-app.services.ai_stages.analyze (restored on exit) — no source file is
-touched, so there's no risk of merge collisions with other work in progress.
+process-local monkeypatches of app.services.ai.execute_tool,
+app.services.ai_stages.analyze, AND (since Wave 3) app.services.agents.base
+.execute_tool (restored on exit) — the multi-agent path (--multi-agent) holds
+its own independent copied reference to execute_tool, so both must be
+patched for the capture log to be trustworthy under either architecture. No
+source file is touched, so there's no risk of merge collisions with other
+work in progress.
 
-Known limitation: the `confirm_appointment` tool referenced by the
-"confirmacao_pos_lembrete" scenario does not exist in this revision of
-app/services/ai_tools.py (CLINIC_TOOLS never declares it), so Gemini cannot
-call it yet. That scenario still runs and documents Sofia's current behavior;
-its automatic-checks section calls this out explicitly instead of failing
-silently. Likewise `check_availability` does not currently filter out
+Known limitation: `check_availability` does not currently filter out
 past times-of-day for "today" — the "horario_hoje_tarde" scenario is a
-regression probe for that, not a guaranteed-pass check.
+regression probe for that, not a guaranteed-pass check. `confirm_appointment`
+exists in CLINIC_TOOLS as of Wave 1 — the "confirmacao_pos_lembrete" scenario
+tests whether Sofia actually calls it, not whether it exists.
 """
 
 from __future__ import annotations
@@ -143,12 +144,34 @@ def _install_capture_patches() -> None:
     ai_service.execute_tool = _execute_tool_capture
     # ai.py calls `ai_stages.analyze(...)` — a dynamic attribute lookup on the
     # module object, so patching the module attribute directly is enough.
+    # This ALSO covers the multi-agent orchestrator (--multi-agent /
+    # app/services/agents/orchestrator.py), which calls ai_stages.analyze the
+    # same way.
     ai_stages_module.analyze = _analyze_capture
+
+    # Wave 3 (--multi-agent): app/services/agents/base.py ALSO does
+    # `from app.services.ai_tools import execute_tool`, its OWN independent
+    # copied reference — patching ai_service.execute_tool above has NO effect
+    # on it (the same "patch where it's looked up, not where it's defined"
+    # trap this module's own docstring warns about, just missed the second
+    # copy when this file was first written before agents/base.py existed).
+    # Import lazily so this script still runs fine against a revision that
+    # somehow lacks the agents package.
+    try:
+        import app.services.agents.base as agents_base_module
+
+        agents_base_module.execute_tool = _execute_tool_capture
+    except ImportError:
+        agents_base_module = None
+    globals()["_agents_base_module"] = agents_base_module
 
 
 def _uninstall_capture_patches() -> None:
     ai_service.execute_tool = _ORIGINAL_EXECUTE_TOOL
     ai_stages_module.analyze = _ORIGINAL_ANALYZE
+    agents_base_module = globals().get("_agents_base_module")
+    if agents_base_module is not None:
+        agents_base_module.execute_tool = _ORIGINAL_EXECUTE_TOOL
 
 
 @contextlib.contextmanager
@@ -341,13 +364,20 @@ def check_pedido_humano(turn_results: list[dict], now_local: datetime) -> list[s
 
 def check_confirmacao_pos_lembrete(turn_results: list[dict], now_local: datetime) -> list[str]:
     confirm = _tools_called(turn_results, "confirm_appointment")
-    lines = [f"- tool confirm_appointment foi chamada? {'SIM' if confirm else 'NÃO'}"]
-    if not confirm:
+    lines = [f"- tool confirm_appointment foi chamada? {'SIM' if confirm else 'NÃO — revisar'}"]
+    tool_declared = any(
+        d.name == "confirm_appointment" for d in ai_tools_module.CLINIC_TOOLS.function_declarations
+    )
+    if not confirm and not tool_declared:
         lines.append(
-            "- LIMITAÇÃO CONHECIDA: `confirm_appointment` não está declarada em CLINIC_TOOLS "
+            "- LIMITAÇÃO: `confirm_appointment` não está declarada em CLINIC_TOOLS "
             "(app/services/ai_tools.py) nesta revisão — o Gemini não tem como chamar uma tool que não "
-            "existe. Isso é esperado até outro time registrar essa tool; o cenário ainda documenta o "
-            "comportamento atual da Sofia diante de uma confirmação pós-lembrete."
+            "existe."
+        )
+    elif not confirm:
+        lines.append(
+            "- A tool EXISTE (CLINIC_TOOLS a declara) mas não foi chamada nesta conversa — revisar se "
+            "Sofia só confirmou em texto sem persistir o status CONFIRMED no banco."
         )
     return lines
 
