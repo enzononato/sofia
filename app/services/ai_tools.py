@@ -301,31 +301,6 @@ _set_crm_stage_decl = types.FunctionDeclaration(
     ),
 )
 
-_request_human_handoff_decl = types.FunctionDeclaration(
-    name="request_human_handoff",
-    description=(
-        "Transfere o atendimento deste paciente para um humano da equipe e pausa você (Sofia) "
-        "nesta conversa até a equipe reativar manualmente. Chame esta ferramenta quando: o "
-        "paciente pedir explicitamente para falar com um humano, um atendente, o dono ou uma "
-        "'pessoa de verdade'; ele estiver claramente irritado ou insatisfeito; relatar dor forte, "
-        "complicação pós-procedimento ou qualquer urgência clínica; pedir algo fora do que você "
-        "pode resolver sozinha (negociação de desconto além do que os dados permitem, exceção de "
-        "política, reclamação séria); ou depois de 2 ou mais tentativas sem conseguir resolver a "
-        "mesma coisa. Esta ferramenta SÓ pausa o atendimento automático — não existe forma de "
-        "reativá-lo por aqui, isso é feito manualmente pela equipe."
-    ),
-    parameters=types.Schema(
-        type=types.Type.OBJECT,
-        properties={
-            "reason": types.Schema(
-                type=types.Type.STRING,
-                description="Motivo curto da transferência (ex: 'pediu para falar com atendente humano').",
-            ),
-        },
-        required=["reason"],
-    ),
-)
-
 # Single Tool object bundling all declarations
 CLINIC_TOOLS = types.Tool(
     function_declarations=[
@@ -340,7 +315,6 @@ CLINIC_TOOLS = types.Tool(
         _update_contact_info_decl,
         _list_professionals_decl,
         _set_crm_stage_decl,
-        _request_human_handoff_decl,
     ]
 )
 
@@ -415,9 +389,6 @@ async def execute_tool(
 
     if name == "set_crm_stage":
         return await _set_crm_stage(db, tenant_id, contact_id, args)
-
-    if name == "request_human_handoff":
-        return await _request_human_handoff(db, tenant_id, contact_id, args)
 
     return {"error": f"Unknown tool: {name}"}
 
@@ -802,21 +773,20 @@ async def _check_availability(
         }
 
     # ── Service duration for the requested service ────────────────────────────
+    # Unknown id => reject (see _create_appointment): silently falling back to the
+    # default duration made Sofia offer slots sized for the wrong procedure.
     slot_minutes = _DEFAULT_SLOT_MINUTES
     service_id_str = args.get("service_id")
     if service_id_str:
-        try:
-            svc_result = await db.execute(
-                select(Service).where(
-                    Service.id == uuid.UUID(service_id_str),
-                    Service.tenant_id == tenant_id,
+        svc = await _resolve_service(db, tenant_id, service_id_str)
+        if svc is None:
+            return {
+                "error": (
+                    "service_id desconhecido. Chame list_services e use exatamente o id "
+                    "retornado por ela — não invente nem aproxime um id."
                 )
-            )
-            svc = svc_result.scalar_one_or_none()
-            if svc:
-                slot_minutes = svc.duration_minutes
-        except ValueError:
-            pass
+            }
+        slot_minutes = svc.duration_minutes
 
     slot_dur = timedelta(minutes=slot_minutes)
 
@@ -877,25 +847,26 @@ async def _create_appointment(
     if scheduled_at.tzinfo is None:
         scheduled_at = scheduled_at.replace(tzinfo=_clinic_tz(tenant_settings))
 
-    # Resolve & validate service, capturing its duration for ends_at
+    # Resolve & validate service, capturing its duration for ends_at.
+    # A service_id the model made up must FAIL LOUDLY: silently ignoring it (what
+    # this used to do) created the appointment with service_id=None and the default
+    # 60-min duration while Sofia told the patient the service by name — leaving the
+    # clinic with a booked slot and no procedure. The per-professional path already
+    # rejects unknown ids; this keeps both paths consistent.
     service_id: uuid.UUID | None = None
     duration_minutes = _DEFAULT_SLOT_MINUTES
     service_id_str = args.get("service_id")
     if service_id_str:
-        try:
-            candidate = uuid.UUID(service_id_str)
-            # Validate that service belongs to the tenant
-            svc_result = await db.execute(
-                select(Service).where(
-                    Service.id == candidate, Service.tenant_id == tenant_id
+        svc = await _resolve_service(db, tenant_id, service_id_str)
+        if svc is None:
+            return {
+                "error": (
+                    "service_id desconhecido. Chame list_services e use exatamente o id "
+                    "retornado por ela — não invente nem aproxime um id."
                 )
-            )
-            svc = svc_result.scalar_one_or_none()
-            if svc:
-                service_id = candidate
-                duration_minutes = svc.duration_minutes
-        except ValueError:
-            pass  # invalid UUID — ignore silently
+            }
+        service_id = svc.id
+        duration_minutes = svc.duration_minutes
 
     ends_at = scheduled_at + timedelta(minutes=duration_minutes)
 
@@ -1127,21 +1098,21 @@ async def _reschedule_appointment(
     if appointment is None:
         return {"error": "Agendamento não encontrado ou já cancelado."}
 
-    # Determine the effective service (new one if provided + valid, else current)
+    # Determine the effective service (new one if provided + valid, else current).
+    # Unknown id => reject rather than silently keeping the old service: the patient
+    # would be told the procedure changed while the booking still held the old one.
     target_service_id = appointment.service_id
     new_service_id_str = args.get("new_service_id")
     if new_service_id_str:
-        try:
-            candidate = uuid.UUID(new_service_id_str)
-            svc_result = await db.execute(
-                select(Service).where(
-                    Service.id == candidate, Service.tenant_id == tenant_id
+        svc = await _resolve_service(db, tenant_id, new_service_id_str)
+        if svc is None:
+            return {
+                "error": (
+                    "new_service_id desconhecido. Chame list_services e use exatamente o id "
+                    "retornado por ela — não invente nem aproxime um id."
                 )
-            )
-            if svc_result.scalar_one_or_none():
-                target_service_id = candidate
-        except ValueError:
-            pass  # invalid UUID — silently ignore (keep old service)
+            }
+        target_service_id = svc.id
 
     # Resolve duration for the effective service to compute ends_at
     duration_minutes = _DEFAULT_SLOT_MINUTES
@@ -1378,6 +1349,15 @@ _AI_SETTABLE_STAGES = {
     CrmStage.LOST.value,
 }
 
+# Stages that record something that FACTUALLY happened (a booking exists, the
+# visit happened). Once a contact is in one of these, the AI must not drag it
+# back to a lead temperature — see the guard in _set_crm_stage.
+_FACTUAL_STAGES = {
+    CrmStage.SCHEDULED.value,
+    CrmStage.ATTENDED.value,
+    CrmStage.POST_CARE.value,
+}
+
 
 async def _set_crm_stage(
     db: AsyncSession,
@@ -1401,6 +1381,33 @@ async def _set_crm_stage(
     if contact is None:
         return {"error": "Contato não encontrado."}
 
+    # Never regress a factual stage. `scheduled`/`attended`/`post_care` are set
+    # deterministically by app/services/crm.py from real events (a booking was
+    # made, the visit happened) — that module is careful never to walk them
+    # backwards, but this executor used to overwrite unconditionally. The prompt
+    # asks Sofia to classify on EVERY turn, so a patient who already had a slot
+    # booked and then said "vou pensar" got dragged from `scheduled` back to
+    # `cold_lead`, and the clinic lost the booking from the funnel view.
+    # `lost` is still allowed: an explicit give-up is real information.
+    if contact.crm_stage in _FACTUAL_STAGES and stage != CrmStage.LOST.value:
+        logger.info(
+            "crm_stage_regression_blocked",
+            extra={
+                "tenant_id": str(tenant_id),
+                "contact_id": str(contact_id),
+                "current": str(contact.crm_stage),
+                "attempted": stage,
+            },
+        )
+        return {
+            "success": False,
+            "crm_stage": contact.crm_stage,
+            "message": (
+                "Este paciente já está em um estágio factual (já agendou ou já foi atendido). "
+                "Não reclassifique: siga a conversa normalmente."
+            ),
+        }
+
     contact.crm_stage = stage
     contact.crm_stage_source = "ai"
     contact.crm_stage_updated_at = datetime.now(timezone.utc)
@@ -1411,44 +1418,6 @@ async def _set_crm_stage(
         contact_id, tenant_id, stage, args.get("reason"),
     )
     return {"success": True, "crm_stage": stage}
-
-
-async def _request_human_handoff(
-    db: AsyncSession,
-    tenant_id: uuid.UUID,
-    contact_id: uuid.UUID,
-    args: dict,
-) -> dict:
-    """Pause Sofia on this contact and hand the conversation off to the human
-    team. tenant_id/contact_id come from context — never from args. This is a
-    one-way switch: the AI has no matching "resume" tool, only the team can
-    un-pause via the existing Inbox UI (PATCH /contacts/{id})."""
-    contact = (
-        await db.execute(
-            select(Contact).where(Contact.id == contact_id, Contact.tenant_id == tenant_id)
-        )
-    ).scalar_one_or_none()
-    if contact is None:
-        return {"error": "Contato não encontrado."}
-
-    contact.ai_paused = True
-    await db.flush()
-
-    logger.warning(
-        "human_handoff_requested",
-        extra={
-            "tenant_id": str(tenant_id),
-            "contact_id": str(contact_id),
-            "reason": args.get("reason"),
-        },
-    )
-    return {
-        "success": True,
-        "message": (
-            "Atendimento transferido para a equipe. Envie UMA mensagem curta e acolhedora "
-            "avisando que alguém da equipe já vai continuar por ali — não tente resolver de novo."
-        ),
-    }
 
 
 # ---------------------------------------------------------------------------

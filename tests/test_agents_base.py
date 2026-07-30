@@ -63,34 +63,6 @@ class TestRunSpecialistLoop:
             ai_cfg={},
         )
         assert reply.text == "Oi! Como posso ajudar?"
-        assert reply.escalated is False
-        assert len(client.models.calls) == 1
-
-    async def test_escalate_tool_short_circuits_and_discards_text(self):
-        # The model calls escalate_to_human as its first move — the loop must
-        # stop immediately with empty text (replace, not append) and never
-        # touch execute_tool (no second call scripted — SequencedFakeClient
-        # would raise AssertionError if the loop tried to continue).
-        client = SequencedFakeClient([
-            fake_function_call(agents_base.ESCALATE_TOOL_NAME, {"reason": "paciente pediu atendente"}),
-        ])
-        reply = await agents_base.run_specialist_loop(
-            client=client,
-            model="gemini-2.5-flash",
-            temperature=0.7,
-            max_output_tokens=512,
-            system_prompt="prompt",
-            tools=agents_base.tools_subset({"list_services"}),
-            allowed_tool_names={"list_services"},
-            contents=[],
-            db=object(),
-            tenant=_tenant(),
-            contact=_contact(),
-            ai_cfg={},
-        )
-        assert reply.escalated is True
-        assert reply.escalate_reason == "paciente pediu atendente"
-        assert reply.text == ""
         assert len(client.models.calls) == 1
 
     async def test_disallowed_tool_call_is_rejected_before_execute_tool(self):

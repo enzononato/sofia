@@ -1,13 +1,13 @@
 "use client";
 
 import { useEffect, useRef, useState, useCallback } from "react";
-import { Contact, Message, useMessages, useSendMessage, useSendMedia, useUpdateContact } from "@/hooks/useInbox";
+import { Contact, Message, useMessages, useSendMessage, useSendMedia, useUpdateContact, useSuggestReply } from "@/hooks/useInbox";
 import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar";
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent } from "@/components/ui/dialog";
 import {
   Bot, Phone, Send, User, PauseCircle, PlayCircle, Loader2,
-  Mic, Square, Paperclip, Image as ImageIcon, FileText, X, Download,
+  Mic, Square, Paperclip, Image as ImageIcon, FileText, X, Download, Sparkles,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { format, isToday, isYesterday } from "date-fns";
@@ -110,6 +110,7 @@ export function ChatWindow({ contact }: ChatWindowProps) {
   const { mutate: sendMessage, isPending: isSending } = useSendMessage();
   const { mutate: sendMedia, isPending: isSendingMedia } = useSendMedia();
   const { mutate: updateContact, isPending: isUpdatingStatus } = useUpdateContact();
+  const { mutate: suggestReply, isPending: isSuggesting } = useSuggestReply();
   const [inputText, setInputText] = useState("");
   const scrollContainerRef = useRef<HTMLDivElement>(null);
   const hasScrolledRef = useRef(false);
@@ -185,6 +186,24 @@ export function ChatWindow({ contact }: ChatWindowProps) {
 
   const handleToggleAI = () => {
     updateContact({ id: contact.id, data: { ai_paused: !contact.ai_paused } });
+  };
+
+  // Staff copilot: ask Sofia to draft a reply and drop it into the input for
+  // the human to review/edit before sending. Read-only on the backend — this
+  // never sends or persists anything on its own.
+  const handleSuggest = () => {
+    if (isSuggesting || isBusy) return;
+    suggestReply(contact.id, {
+      onSuccess: (suggestion) => {
+        if (suggestion?.trim()) {
+          setInputText(suggestion);
+          inputRef.current?.focus();
+        } else {
+          alert("A Sofia não conseguiu sugerir uma resposta para esta conversa.");
+        }
+      },
+      onError: () => alert("Não consegui gerar uma sugestão agora. Tente de novo em instantes."),
+    });
   };
 
   // ── Audio Recording ───────────────────────────────────────────────────
@@ -460,6 +479,26 @@ export function ChatWindow({ contact }: ChatWindowProps) {
           </div>
         ) : (
           /* ── Normal Mode ── */
+          <div className="flex flex-col gap-2">
+            {/* Staff copilot: draft a reply with Sofia, then edit before sending */}
+            <div className="flex">
+              <button
+                type="button"
+                onClick={handleSuggest}
+                disabled={isSuggesting || isBusy}
+                title="A Sofia escreve um rascunho de resposta pra você revisar e enviar"
+                className={cn(
+                  "inline-flex items-center gap-1.5 rounded-full border border-primary/20 bg-primary/5 px-3 py-1.5 text-[11px] font-semibold text-primary transition-all hover:bg-primary/10 active:scale-95 cursor-pointer",
+                  (isSuggesting || isBusy) && "opacity-50 cursor-not-allowed"
+                )}
+              >
+                {isSuggesting ? (
+                  <><Loader2 className="h-3.5 w-3.5 animate-spin" /> Sofia está escrevendo...</>
+                ) : (
+                  <><Sparkles className="h-3.5 w-3.5" /> Sugerir resposta</>
+                )}
+              </button>
+            </div>
           <form onSubmit={handleSend} className="flex items-center gap-2">
             {/* Attachment Button */}
             <div className="relative">
@@ -536,6 +575,7 @@ export function ChatWindow({ contact }: ChatWindowProps) {
               </button>
             )}
           </form>
+          </div>
         )}
       </div>
 

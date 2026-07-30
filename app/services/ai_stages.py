@@ -48,21 +48,19 @@ DEFAULT_STAGE_OVERLAYS: dict[Stage, str] = {
         "não obrigue a passar por uma apresentação se ele já está pedindo algo."
     ),
     Stage.IMMINENT_APPOINTMENT: (
-        "O paciente TEM um agendamento confirmado nas próximas 48 horas.\n"
+        "O paciente TEM um agendamento nas próximas 48 horas.\n"
         "- É provável que esteja entrando em contato sobre isso (confirmar, remarcar ou cancelar).\n"
-        "- Os detalhes desse agendamento (dia/hora/id) já estão no CONTEXTO DO PACIENTE — use-os "
-        "em vez de perguntar de novo.\n"
-        "- Se ele quiser mexer nesse agendamento e isso não for algo que você resolve "
-        "diretamente por aqui, é papel de quem organiza os horários — encaminhe com naturalidade, "
-        "sem prometer que você mesma vai remarcar/cancelar se não for sua parte."
+        "- Os detalhes desse agendamento (dia, hora e id) já estão no CONTEXTO DO PACIENTE. "
+        "Use-os em vez de perguntar de novo.\n"
+        "- Resolva na hora o que ele pedir: confirmar, remarcar ou cancelar. Não anuncie que vai "
+        "fazer, faça e conte o resultado."
     ),
     Stage.POST_APPOINTMENT: (
         "O paciente teve um atendimento nas últimas 48 horas.\n"
         "- Demonstre interesse em saber como foi.\n"
-        "- Se for serviço recorrente (ex: limpeza, manutenção), é natural sugerir já deixar o "
-        "próximo encaminhado — se agendar não for algo que você resolve diretamente por aqui, "
-        "plante a ideia e deixe o próximo passo dele continuar o assunto.\n"
-        "- Não force vendas — escute primeiro."
+        "- Se for serviço recorrente (ex: limpeza, manutenção), sugira já deixar o próximo "
+        "marcado.\n"
+        "- Não force vendas, escute primeiro."
     ),
     Stage.ACTIVE_PATIENT: (
         "Paciente já é recorrente da clínica.\n"
@@ -72,9 +70,9 @@ DEFAULT_STAGE_OVERLAYS: dict[Stage, str] = {
     ),
     Stage.RETURNING_LEAD: (
         "Paciente já conversou antes mas NUNCA agendou.\n"
-        "- Seja proativa: apresente serviços e sugira datas.\n"
+        "- Seja proativa: apresente serviços e proponha um dia concreto para ele vir.\n"
         "- Se houver hesitação, ofereça alternativas (horário, valor, formato).\n"
-        "- Use list_services e check_availability sem esperar pedido explícito."
+        "- Use as ferramentas que você tem sem esperar pedido explícito."
     ),
     Stage.REACTIVATION: (
         "Paciente sumiu há mais de 30 dias.\n"
@@ -210,11 +208,10 @@ def build_context_block(
     if contact.whatsapp_name and contact.whatsapp_name != contact.full_name:
         lines.append(f"Nome no WhatsApp: {contact.whatsapp_name}")
     lines.append(f"Status: {contact.status}")
-    lines.append(
-        f"Estágio no funil (CRM): {contact.crm_stage} "
-        "(classifique com set_crm_stage conforme a conversa: interesse claro → hot_lead, "
-        "pouco engajado/só pesquisando → cold_lead, sem interesse → lost)"
-    )
+    # Fact only. The instruction to (re)classify lives with the agent that
+    # actually holds `set_crm_stage` (Sales) — telling every agent to call it
+    # would have Booking burning an iteration on a tool it doesn't have.
+    lines.append(f"Estágio no funil (CRM): {contact.crm_stage}")
     if contact.email:
         lines.append(f"Email: {contact.email}")
     if contact.phone:

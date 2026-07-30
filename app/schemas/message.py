@@ -52,3 +52,11 @@ class MessageCreate(BaseModel):
     content: str
     direction: MessageDirection = MessageDirection.OUTBOUND
     channel: MessageChannel = MessageChannel.WHATSAPP
+
+
+class SuggestedReply(BaseModel):
+    """Draft reply produced by the Inbox "Sugerir resposta" (staff copilot).
+    Not persisted or sent — the human edits it and sends via the normal
+    POST /contacts/{id}/messages path."""
+
+    suggestion: str

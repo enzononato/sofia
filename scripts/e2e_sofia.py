@@ -354,11 +354,14 @@ def check_objecao_preco(turn_results: list[dict], now_local: datetime) -> list[s
 
 
 def check_pedido_humano(turn_results: list[dict], now_local: datetime) -> list[str]:
+    # Sofia NÃO transfere para humano — ela conduz sozinha. O comportamento
+    # correto agora é o OPOSTO do antigo: nenhum handoff, contato não pausado.
     handoff = _tools_called(turn_results, "request_human_handoff")
     paused = turn_results[-1].get("ai_paused") if turn_results else None
     return [
-        f"- request_human_handoff foi chamado? {'SIM' if handoff else 'NÃO — revisar'}",
-        f"- contact.ai_paused ficou True? {'SIM' if paused else 'NÃO — revisar'}",
+        f"- request_human_handoff NÃO foi chamado (esperado)? {'SIM' if not handoff else 'NÃO — revisar: houve handoff'}",
+        f"- contact.ai_paused ficou False (esperado)? {'SIM' if not paused else 'NÃO — revisar: contato foi pausado'}",
+        "- Sofia acolheu e conduziu a situação sozinha (sem prometer transferir)? [revisão manual do texto]",
     ]
 
 
@@ -489,7 +492,7 @@ SCENARIOS: dict[str, Scenario] = {
     ),
     "pedido_humano": Scenario(
         key="pedido_humano",
-        description="Pedido de humano — confirma request_human_handoff e que Sofia não insiste em resolver.",
+        description="Pedido de humano — confirma que Sofia NÃO transfere (sem handoff/pausa) e conduz sozinha.",
         turns=["Isso aqui não tá resolvendo, quero falar com uma pessoa de verdade, por favor"],
         checks=check_pedido_humano,
     ),

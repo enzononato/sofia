@@ -7,6 +7,7 @@ GET    /contacts/{id}/messages    — conversation history (paginated)
 PATCH  /contacts/{id}             — update data / status
 """
 
+import base64
 import uuid
 from datetime import datetime, timezone
 from typing import Annotated
@@ -16,14 +17,16 @@ from sqlalchemy import desc, func, select
 from sqlalchemy.orm import defer
 
 from app.api.deps import CurrentTenantId, CurrentUser, DBSession
-from app.core.errors import ForbiddenError, NotFoundError
+from app.config import settings
+from app.core.errors import APIError, ForbiddenError, NotFoundError
 from app.models.appointment import Appointment
 from app.models.contact import Contact, ContactStatus
 from app.models.message import Message
 from app.models.tenant import Tenant
 from app.models.user import User, UserRole
 from app.schemas.contact import ContactRead, ContactReadWithLastMessage, ContactUpdate
-from app.schemas.message import MessageRead, MessageCreate, MessagePreview
+from app.schemas.message import MessageRead, MessageCreate, MessagePreview, SuggestedReply
+from app.services import ai as ai_service
 from app.services import realtime
 from app.services import whatsapp as wa_service
 from app.schemas.pagination import Page, PageMeta, PaginationParams, pagination_params
@@ -224,6 +227,51 @@ async def send_manual_message(
     return msg
 
 
+@router.post("/{contact_id}/suggest-reply", response_model=SuggestedReply)
+async def suggest_reply(
+    contact_id: uuid.UUID,
+    db: DBSession,
+    tenant_id: CurrentTenantId,
+    current_user: CurrentUser,
+):
+    """
+    Ask Sofia to DRAFT a reply for a staff member to review and send (the Inbox
+    "Sugerir resposta" action, reached from the sidebar "Pedir ajuda à Sofia").
+
+    Read-only by construction: the same persona/context as Sofia's real reply,
+    but only consult-tools are available, and this handler NEVER commits — so no
+    message is sent or persisted, no booking is made, and the contact's
+    ai_paused / "answered" state is untouched. The human edits the returned
+    draft and sends it via POST /contacts/{id}/messages.
+    """
+    if current_user.role not in _WRITE_ROLES:
+        raise ForbiddenError("Insufficient permissions.")
+
+    contact = await _get_or_404(db, contact_id, tenant_id, current_user)
+    tenant = await db.scalar(select(Tenant).where(Tenant.id == tenant_id))
+    history = await _fetch_recent_history(db, tenant_id, contact_id)
+
+    try:
+        suggestion = await ai_service.generate_staff_suggestion(
+            tenant=tenant, contact=contact, history=history, db=db
+        )
+    except ai_service.AIGenerationError:
+        # Every Gemini attempt failed (already logged inside generate_reply's
+        # retry helper). Discard any read-side session state and surface a
+        # retryable error — nothing was sent, so the staff can just try again.
+        await db.rollback()
+        raise APIError(
+            "Não consegui gerar uma sugestão agora. Tente de novo em instantes.",
+            code="ai_unavailable",
+            status_code=503,
+        )
+
+    # A suggestion has ZERO side effects: roll back to discard anything the
+    # read-only tool executors may have flushed, so this request never writes.
+    await db.rollback()
+    return SuggestedReply(suggestion=suggestion)
+
+
 @router.patch("/{contact_id}", response_model=ContactRead)
 async def update_contact(
     contact_id: uuid.UUID,
@@ -290,15 +338,14 @@ async def send_media_message(
         file_name=file_name,
     )
 
-    # Save record to database
-    # For audio, save the data URI so it can be played back in the inbox.
-    # For other types, save a label.
-    if media_type == "audio":
-        content_value = media_data  # full data URI (data:audio/webm;base64,...)
-    else:
-        content_value = f"[{media_type.upper()}]"
-        if caption:
-            content_value += f" {caption}"
+    # Persist media the SAME shape the inbound webhook uses: the data URI goes in
+    # `media_url` (a deferred column), never in `content`. Putting it in `content`
+    # (what this route used to do for audio) meant ai.py::_history_text_for saw no
+    # `media_type`, fell through to `return msg.content`, and fed the whole base64
+    # blob to Gemini as TEXT on every later turn for that contact — blowing up cost
+    # and eventually the token limit, which silently stopped Sofia from replying.
+    mime_type, size_bytes = _parse_data_uri_meta(media_data)
+    content_value = caption or (file_name if media_type == "document" else "")
 
     msg = Message(
         tenant_id=tenant_id,
@@ -307,6 +354,10 @@ async def send_media_message(
         channel="whatsapp",
         content=content_value,
         ai_model_used=None,
+        media_type=media_type,
+        media_mime_type=mime_type,
+        media_size_bytes=size_bytes,
+        media_url=media_data or None,
     )
     db.add(msg)
     # Same rationale as send_manual_message: pause Sofia server-side, in the same
@@ -319,6 +370,45 @@ async def send_media_message(
 
 
 # ── Helpers ─────────────────────────────────────────────────────────────────
+
+def _parse_data_uri_meta(data_uri: str) -> tuple[str | None, int | None]:
+    """
+    Extract (mime_type, decoded_size_bytes) from a `data:<mime>;base64,<payload>`
+    URI, mirroring what the inbound webhook stores for patient media. Returns
+    (None, None) for anything that isn't a parseable base64 data URI — the caller
+    still stores the raw value, it just won't have metadata.
+    """
+    if not data_uri or not data_uri.startswith("data:"):
+        return None, None
+    try:
+        header, payload = data_uri.split(",", 1)
+    except ValueError:
+        return None, None
+    mime_type = header[len("data:"):].split(";", 1)[0].strip().lower() or None
+    try:
+        size_bytes = len(base64.b64decode(payload, validate=False))
+    except Exception:
+        size_bytes = None
+    return mime_type, size_bytes
+
+
+async def _fetch_recent_history(
+    db, tenant_id: uuid.UUID, contact_id: uuid.UUID
+) -> list[Message]:
+    """Last AI_HISTORY_LIMIT messages, oldest→newest, for feeding a Sofia
+    generation (the staff-suggestion copilot). Defers `media_url` for the same
+    reason as webhooks._fetch_history: the suggestion path represents past media
+    turns as a short text marker and never reads the (possibly multi-MB) data
+    URI, so don't load it into every message on every click."""
+    rows = await db.execute(
+        select(Message)
+        .options(defer(Message.media_url))
+        .where(Message.tenant_id == tenant_id, Message.contact_id == contact_id)
+        .order_by(desc(Message.created_at))
+        .limit(settings.AI_HISTORY_LIMIT)
+    )
+    return list(reversed(rows.scalars().all()))
+
 
 async def _professional_has_access(
     db, contact_id: uuid.UUID, tenant_id: uuid.UUID, professional_id: uuid.UUID

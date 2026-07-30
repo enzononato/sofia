@@ -21,6 +21,7 @@ const formSchema = z.object({
   temperature: z.coerce.number().min(0).max(2).optional(),
   max_output_tokens: z.coerce.number().min(100).optional(),
   multimodal_enabled: z.boolean().default(true),
+  multi_agent_enabled: z.boolean().default(false),
 });
 
 type FormValues = z.infer<typeof formSchema>;
@@ -71,6 +72,8 @@ export function AiTab({ tenant }: { tenant: TenantProfile }) {
       max_output_tokens: defaultValues.max_output_tokens || 1024,
       // Multimodal defaults ON (only an explicit false disables it).
       multimodal_enabled: defaultValues.multimodal_enabled ?? true,
+      // Multi-agent defaults OFF (opt-in per clinic; see AI_MULTI_AGENT_ENABLED).
+      multi_agent_enabled: defaultValues.multi_agent_enabled ?? false,
     },
   });
 
@@ -86,6 +89,7 @@ export function AiTab({ tenant }: { tenant: TenantProfile }) {
           temperature: data.temperature,
           max_output_tokens: data.max_output_tokens,
           multimodal_enabled: data.multimodal_enabled,
+          multi_agent_enabled: data.multi_agent_enabled,
         }
       });
       setIsSuccess(true);
@@ -223,6 +227,29 @@ export function AiTab({ tenant }: { tenant: TenantProfile }) {
           </div>
           <Controller
             name="multimodal_enabled"
+            control={control}
+            render={({ field }) => (
+              <Switch checked={field.value} onCheckedChange={field.onChange} className="cursor-pointer" />
+            )}
+          />
+        </div>
+
+        <div className="flex flex-row items-center justify-between rounded-2xl border border-white/10 p-4 bg-white/5 shadow-md">
+          <div className="space-y-0.5">
+            <Label className="font-heading text-sm font-semibold text-foreground flex items-center gap-2">
+              <Layers className="h-4 w-4 text-primary" />
+              Atendimento por especialistas (beta)
+            </Label>
+            <p className="text-xs text-muted-foreground/80 font-sans mt-0.5 leading-relaxed">
+              Em vez de uma Sofia única, o atendimento é dividido: uma parte cuida da agenda e
+              outra apresenta procedimentos e preços. Cada uma recebe instruções mais focadas,
+              o que tende a deixar as respostas mais precisas. Em compensação, <strong className="font-semibold">custa
+              de 2 a 3 vezes mais por mensagem</strong> e leva um pouco mais de tempo para responder.
+              Recomendado ativar primeiro em uma clínica de teste.
+            </p>
+          </div>
+          <Controller
+            name="multi_agent_enabled"
             control={control}
             render={({ field }) => (
               <Switch checked={field.value} onCheckedChange={field.onChange} className="cursor-pointer" />

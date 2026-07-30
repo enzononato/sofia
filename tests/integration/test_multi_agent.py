@@ -34,7 +34,6 @@ from tests.integration.test_webhooks import (
     _get_messages,
     _message_payload,
     _random_phone,
-    _wait_until,
     _wait_until_async,
     _webhook_path,
 )
@@ -127,36 +126,22 @@ async def test_multi_agent_reply_flows_through_full_humanization_pipeline(
     assert _mock_whatsapp_io["mark_messages_as_read"].await_count == 1
 
 
-async def test_multi_agent_handoff_still_fires_email_alert(
-    client, db_sessionmaker, tenant_a: SeededTenant, _mock_whatsapp_io, monkeypatch
+async def test_multi_agent_upset_patient_is_resolved_without_handoff(
+    client, db_sessionmaker, tenant_a: SeededTenant, _mock_whatsapp_io
 ):
     """
-    Proves the handoff alert wiring (app/services/agents/base.py's
-    run_specialist_loop, added specifically because it was missing when
-    first written) fires through the real webhook pipeline when the
-    multi-agent Handoff specialist is the one calling request_human_handoff
-    — not just in unit tests.
+    A patient asking to "talk to a real person" / complaining is handled by
+    the Sales specialist through the full webhook pipeline — Sofia resolves it
+    herself. There is no handoff route, so the contact must NOT be paused.
     """
     await _enable_multi_agent(db_sessionmaker, tenant_a.tenant_id)
     secret, _token = await _configure_whatsapp(db_sessionmaker, tenant_a.tenant_id)
 
-    from app.api.v1.routes import webhooks as webhooks_module
-
-    handoff_alert = AsyncMock(return_value=True)
-    monkeypatch.setattr(webhooks_module, "send_handoff_alert_email", handoff_alert)
-    # base.py imports send_handoff_alert_email directly into its own
-    # namespace — patch it there too (same "patch where it's looked up"
-    # rule documented throughout this test suite).
-    import app.services.agents.base as agents_base_module
-
-    monkeypatch.setattr(agents_base_module, "send_handoff_alert_email", handoff_alert)
-
     import app.services.agents.orchestrator as orchestrator_module
 
     fake_client = SequencedFakeClient([
-        fake_function_call("classify", {"agents": ["handoff"], "handoff_reason": "quer atendente"}),  # router
-        fake_function_call("request_human_handoff", {"reason": "quer atendente"}),  # handoff's real tool call
-        fake_text("Vou te passar pra alguém da equipe, já já continuam por aqui 😊"),  # handoff's goodbye
+        fake_function_call("classify", {"agents": ["sales"]}),  # router → sales (no handoff route)
+        fake_text("Poxa, sinto muito que ficou assim! Me conta o que rolou que eu resolvo com você 💛"),
     ])
     orchestrator_module._get_client = lambda: fake_client  # noqa: SLF001
 
@@ -164,7 +149,7 @@ async def test_multi_agent_handoff_still_fires_email_alert(
     resp = await client.post(
         _webhook_path(tenant_a.slug),
         params={"token": secret},
-        json=_message_payload(phone=phone, text="quero falar com um atendente"),
+        json=_message_payload(phone=phone, text="quero falar com uma pessoa de verdade, isso é péssimo"),
     )
     assert resp.status_code == 200
 
@@ -173,18 +158,14 @@ async def test_multi_agent_handoff_still_fires_email_alert(
         return any(m.direction == "outbound" for m in msgs)
 
     assert await _wait_until_async(_has_outbound)
-    assert await _wait_until(lambda: handoff_alert.await_count >= 1)
 
-    # Contact must actually be paused (ai_paused=True) — the real DB write
-    # from ai_tools._request_human_handoff, unaffected by any of this.
+    # Contact must NOT be paused — Sofia handled it herself, no ai_paused write.
     from app.models.contact import Contact
 
-    async def _contact_paused() -> bool:
-        async with db_sessionmaker() as session:
-            result = await session.execute(
-                select(Contact).where(Contact.tenant_id == tenant_a.tenant_id, Contact.phone == phone)
-            )
-            contact = result.scalar_one_or_none()
-            return bool(contact and contact.ai_paused)
-
-    assert await _wait_until_async(_contact_paused)
+    async with db_sessionmaker() as session:
+        result = await session.execute(
+            select(Contact).where(Contact.tenant_id == tenant_a.tenant_id, Contact.phone == phone)
+        )
+        contact = result.scalar_one_or_none()
+    assert contact is not None
+    assert contact.ai_paused is False

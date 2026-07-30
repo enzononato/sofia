@@ -1,8 +1,9 @@
 """
 Router/Triage agent (Wave 3 multi-agent Sofia): a single, cheap, non-looping
-Gemini call that classifies which specialist(s) should handle this turn. It
-NEVER produces patient-facing text — its only output is a forced function
-call to `classify(agents, handoff_reason)`.
+Gemini call that classifies which specialist(s) should handle this turn
+(booking / sales — there is no human-handoff route). It NEVER produces
+patient-facing text — its only output is a forced function call to
+`classify(agents)`.
 
 Deliberately built from scratch, not "SHARED_BASE_PROMPT minus stuff": the
 persona/tone/formatting rules in base.SHARED_BASE_PROMPT exist to shape
@@ -23,7 +24,7 @@ from app.services.ai import _generate_content_with_retry
 
 logger = logging.getLogger(__name__)
 
-VALID_AGENTS = {"booking", "sales", "handoff"}
+VALID_AGENTS = {"booking", "sales"}
 _DEFAULT_AGENT = "sales"  # generalist catch-all — closest to today's greeting/default behavior
 
 _CLASSIFY_DECL = types.FunctionDeclaration(
@@ -37,12 +38,8 @@ _CLASSIFY_DECL = types.FunctionDeclaration(
         properties={
             "agents": types.Schema(
                 type=types.Type.ARRAY,
-                items=types.Schema(type=types.Type.STRING, enum=["booking", "sales", "handoff"]),
+                items=types.Schema(type=types.Type.STRING, enum=["booking", "sales"]),
                 description="Lista ordenada de 1 a 2 especialistas que devem responder a esta mensagem.",
-            ),
-            "handoff_reason": types.Schema(
-                type=types.Type.STRING,
-                description="Se 'handoff' estiver na lista, motivo curto do encaminhamento.",
             ),
         },
         required=["agents"],
@@ -56,47 +53,40 @@ Você é o roteador interno de atendimento de uma clínica de estética via What
 tarefa é decidir quem deve responder a mensagem atual do paciente — você NUNCA escreve a \
 resposta, só classifica.
 
-Especialistas disponíveis:
+Especialistas disponíveis (SÓ existem estes dois — todo atendimento é resolvido por aqui, \
+não há transferência para humano):
 - "booking": tudo sobre agenda — verificar horário, marcar, remarcar, cancelar, confirmar \
 presença em um agendamento existente.
 - "sales": apresentar serviços/procedimentos, preços, formas de pagamento, políticas da \
 clínica, e conduzir quem está decidindo/hesitando (objeções, "vou pensar", comparação de \
-preço). Também é o especialista padrão para saudações e conversa geral sem um pedido claro.
-- "handoff": o paciente pede explicitamente para falar com uma pessoa/atendente/o dono; está \
-claramente irritado ou insatisfeito; relata dor forte, complicação após procedimento ou \
-urgência clínica; ou pede algo que claramente foge do que os outros dois especialistas \
-resolvem.
+preço, cliente insistente ou insatisfeito, reclamação, ou pedido para "falar com alguém"). \
+Também é o especialista padrão para saudações e conversa geral sem um pedido claro.
 
 Regras:
 - Escolha 1 especialista na maioria dos casos.
 - Escolha 2 (nesta ordem: o que a mensagem menciona primeiro, depois o segundo) SOMENTE \
 quando a mensagem tiver claramente dois pedidos de domínios diferentes na mesma mensagem \
 (ex.: "quanto custa a limpeza e vocês têm horário quinta?" -> ["sales", "booking"]).
-- Se "handoff" for aplicável, ele deve ser o ÚNICO item da lista — nunca combine handoff com \
-outro especialista.
 - Na dúvida entre booking e sales (ex.: "quero marcar uma limpeza" sem saber o preço ainda), \
 escolha "booking" se o paciente já decidiu o que quer e só falta agendar; escolha "sales" se \
 ele ainda está decidindo ou perguntando sobre o serviço.
+- Objeção, insistência, reclamação, cliente irritado ou pedido de "falar com uma pessoa" NÃO \
+saem do atendimento: role para "sales", que conduz a situação com jogo de cintura.
 - Sempre chame a função classify — nunca responda em texto livre.
 """
 
 
 class RouterDecision:
-    __slots__ = ("agents", "handoff_reason")
+    __slots__ = ("agents",)
 
-    def __init__(self, agents: list[str], handoff_reason: str | None = None):
+    def __init__(self, agents: list[str]):
         self.agents = agents
-        self.handoff_reason = handoff_reason
 
     def __repr__(self) -> str:
-        return f"RouterDecision(agents={self.agents!r}, handoff_reason={self.handoff_reason!r})"
+        return f"RouterDecision(agents={self.agents!r})"
 
     def __eq__(self, other) -> bool:
-        return (
-            isinstance(other, RouterDecision)
-            and self.agents == other.agents
-            and self.handoff_reason == other.handoff_reason
-        )
+        return isinstance(other, RouterDecision) and self.agents == other.agents
 
 
 def _compact_recent_turns(history: list[Message], limit: int = 6) -> str:
@@ -147,11 +137,7 @@ def parse_decision(response) -> RouterDecision:
         logger.warning("router_empty_or_invalid_agents_falling_back", extra={"raw": raw_agents})
         return RouterDecision(agents=[_DEFAULT_AGENT])
 
-    # handoff is never combined with another specialist — see ROUTER_PROMPT.
-    if "handoff" in agents:
-        agents = ["handoff"]
-
-    return RouterDecision(agents=agents, handoff_reason=args.get("handoff_reason"))
+    return RouterDecision(agents=agents)
 
 
 async def classify(

@@ -149,6 +149,21 @@ export function useSendMedia() {
   });
 }
 
+// Staff copilot: ask Sofia to DRAFT a reply for the currently open
+// conversation. Read-only on the backend (never sends/persists/books) — the
+// caller drops the returned text into the message input for the human to edit
+// and send. See POST /contacts/{id}/suggest-reply.
+export function useSuggestReply() {
+  return useMutation({
+    mutationFn: async (contactId: string) => {
+      const response = await api.post<{ suggestion: string }>(
+        `/contacts/${contactId}/suggest-reply`
+      );
+      return response.data.suggestion;
+    },
+  });
+}
+
 export function useUpdateContact() {
   const queryClient = useQueryClient();
 

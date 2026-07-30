@@ -96,11 +96,17 @@ export function Sidebar({ className }: { className?: string }) {
 
         {/* Footer Area */}
         <div className="p-2 border-t border-white/10 flex flex-col gap-1">
-          <button className="w-full py-3 px-4 rounded-xl border border-white/10 bg-[rgba(30,41,59,0.45)] backdrop-blur-md text-foreground flex items-center justify-center gap-2 hover:shadow-lg hover:shadow-primary/10 transition-all font-semibold text-xs hover:scale-[1.02] active:scale-[0.98]">
+          {/* Leads to the Inbox, where the "Sugerir resposta" action lets Sofia
+              draft a reply for the team to review and send. */}
+          <Link
+            href="/dashboard/inbox"
+            title="Abra uma conversa no Inbox e toque em 'Sugerir resposta' para a Sofia te ajudar a responder"
+            className="w-full py-3 px-4 rounded-xl border border-white/10 bg-[rgba(30,41,59,0.45)] backdrop-blur-md text-foreground flex items-center justify-center gap-2 hover:shadow-lg hover:shadow-primary/10 transition-all font-semibold text-xs hover:scale-[1.02] active:scale-[0.98]"
+          >
             <Bolt className="h-4 w-4 text-primary animate-pulse" />
             <span>Pedir ajuda à Sofia</span>
-          </button>
-          
+          </Link>
+
           <Link
             href="/dashboard/settings"
             className={cn(

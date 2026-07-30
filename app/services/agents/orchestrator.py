@@ -3,26 +3,19 @@ Multi-agent orchestrator (Wave 3): the real generate_reply() body when
 multi_agent_enabled_for(tenant) is True (see app/services/ai.py's
 dispatcher). Wires Router -> up to 2 specialist hops -> composition.
 
-Composition has two DIFFERENT modes — this distinction is the most important
-correctness property of this module (see the approved plan,
-drifting-tickling-creek.md, section 2.3 of the design critique it
-incorporates):
+There is NO human handoff: Sofia always resolves the turn herself (objections,
+insistent/upset patients, "quero falar com alguém", complaints are all handled
+by the Sales specialist's conversation skills). Composition has a single
+multi-hop mode:
 
   - COMPOSITE (Router asks for 2 agents up front, e.g. "quanto custa X e tem
     horário quinta?"): both specialists run, both texts are kept and joined
-    with [[BREAK]]. No further escalation allowed in this mode (caps hops at
-    2, avoids a 3rd sequential Gemini call in the same turn).
-  - ESCALATION (Router asks for 1 agent; that agent calls escalate_to_human
-    mid-turn): the specialist's text is DISCARDED, not appended — only
-    Handoff's goodbye is sent. Replaces, matching the pre-existing rule
-    "don't try to resolve again, just say goodbye" — joining with [[BREAK]]
-    here would silently reintroduce that regression via plumbing, not via
-    the model.
+    with [[BREAK]] (caps hops at 2, avoids a 3rd sequential Gemini call in the
+    same turn).
 """
 
 import logging
 
-from google.genai import types
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import settings
@@ -30,7 +23,7 @@ from app.models.contact import Contact
 from app.models.message import Message
 from app.models.tenant import Tenant
 from app.services import ai_stages
-from app.services.agents import booking, handoff, router, sales
+from app.services.agents import booking, router, sales
 from app.services.agents.base import SHARED_BASE_PROMPT, AgentReply, run_specialist_loop
 from app.services.ai import _get_client, build_conversation_contents
 
@@ -38,7 +31,7 @@ logger = logging.getLogger(__name__)
 
 MAX_AGENT_HOPS = 2  # specialist executions only — the Router call doesn't count as a hop.
 
-_SPECIALISTS = {"booking": booking, "sales": sales, "handoff": handoff}
+_SPECIALISTS = {"booking": booking, "sales": sales}
 
 
 def compose_system_prompt(
@@ -80,16 +73,6 @@ def coordination_note_for(previous_text: str) -> str | None:
         "NOTA INTERNA (não é do paciente, é uma instrução sua): nesta mesma mensagem, antes de "
         f'você, já foi respondido: "{previous_text}" — não repita isso nem cumprimente de novo, '
         "apenas complemente com a sua parte, como se fosse a continuação natural da mesma resposta."
-    )
-
-
-def escalation_note_for(reason: str | None) -> str | None:
-    """Ephemeral instruction telling Handoff why the escalating specialist asked for it."""
-    if not reason:
-        return None
-    return (
-        "NOTA INTERNA: o especialista anterior sinalizou este motivo para o encaminhamento: "
-        f'"{reason}".'
     )
 
 
@@ -141,7 +124,6 @@ async def generate_reply(
             "tenant_id": str(tenant.id),
             "contact_id": str(contact.id),
             "agents": decision.agents,
-            "handoff_reason": decision.handoff_reason,
         },
     )
 
@@ -170,27 +152,19 @@ async def generate_reply(
                 "tenant_id": str(tenant.id),
                 "contact_id": str(contact.id),
                 "agent": agent_key,
-                "escalated": reply.escalated,
             },
         )
         return reply
 
-    # Mode: handoff direct — Router itself detected an unambiguous signal.
-    if decision.agents == ["handoff"]:
-        reply = await _run("handoff")
-        return reply.text, reply.model
-
     if len(decision.agents) == 2:
-        # COMPOSITE mode — see module docstring. No escalation slot left.
+        # COMPOSITE mode — see module docstring.
         first_key, second_key = decision.agents
         first = await _run(first_key)
         second = await _run(second_key, coordination_note_for(first.text))
         return join_composite_texts(first.text, second.text), second.model
 
-    # Mode: single agent, with room for ONE escalation hop.
+    # Mode: single agent handles the whole turn (no escalation — Sofia resolves
+    # everything herself).
     (only_key,) = decision.agents
     primary = await _run(only_key)
-    if primary.escalated:
-        handoff_reply = await _run("handoff", escalation_note_for(primary.escalate_reason))
-        return handoff_reply.text, handoff_reply.model
     return primary.text, primary.model

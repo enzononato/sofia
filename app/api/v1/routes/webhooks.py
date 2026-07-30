@@ -231,6 +231,9 @@ async def whatsapp_webhook(
     return {"received": True}
 
 
+# Largest media payload we'll pull from UAZAPI and keep as a base64 data URI.
+_MAX_MEDIA_BYTES = 20 * 1024 * 1024
+
 _MULTIMODAL_DISABLED_REPLY = {
     "audio": "Recebi seu áudio! No momento, só consigo responder mensagens de texto. Por favor, escreva sua mensagem. 😊",
     "image": "Recebi sua imagem! No momento, só consigo responder mensagens de texto. 😊",
@@ -472,6 +475,11 @@ async def _process_inbound_message(tenant: Tenant, data: dict, request_id: str |
         media_mime_type: str | None = None
         media_size_bytes: int | None = None
         media_url: str | None = None
+        # When the media couldn't be made usable for the AI, we still persist the
+        # message (see below), answer the patient with a canned notice, and skip
+        # the AI turn — there's nothing for Sofia to actually read.
+        skip_ai_reply = False
+        pending_notice: str | None = None
 
         # ── Pure text fast path ────────────────────────────────────────────
         if media_kind is None:
@@ -482,58 +490,61 @@ async def _process_inbound_message(tenant: Tenant, data: dict, request_id: str |
 
         # ── Media path ─────────────────────────────────────────────────────
         else:
+            # Whatever happens below, the Message is ALWAYS persisted (with
+            # media_type set; media_url may stay NULL). Returning early here —
+            # what this used to do on a failed download or an oversized file —
+            # dropped the patient's message entirely: it never reached the Inbox,
+            # and the recovery sweep couldn't find it either (no Message row). The
+            # patient asked something by voice and, for the clinic, never wrote.
+            media_type = media_kind
+            content = text  # caption (may be empty)
+            kind_label = {
+                "audio": "áudio", "image": "imagem", "video": "vídeo", "document": "documento"
+            }.get(media_kind, media_kind)
+
             if not multimodal_enabled:
-                if not is_historical and instance_token:
-                    await wa_service.send_text_message(
-                        instance_token=instance_token,
-                        phone=phone,
-                        text=_MULTIMODAL_DISABLED_REPLY.get(media_kind, _MULTIMODAL_DISABLED_REPLY["document"]),
+                skip_ai_reply = True
+                pending_notice = _MULTIMODAL_DISABLED_REPLY.get(
+                    media_kind, _MULTIMODAL_DISABLED_REPLY["document"]
+                )
+                logger.info(
+                    "webhook_media_refused_disabled",
+                    extra={**log_ctx, "phone": phone, "media_type": media_kind},
+                )
+            elif not instance_token:
+                skip_ai_reply = True
+                logger.error("webhook_no_instance_for_download", extra=log_ctx)
+            else:
+                download = await wi.download_media_base64(instance_token, message_id)
+                if download is None:
+                    skip_ai_reply = True
+                    pending_notice = (
+                        f"Oi! Chegou seu {kind_label} aqui, mas não consegui abrir — "
+                        "manda de novo pra mim? 😊"
                     )
-                    logger.info(
-                        "webhook_media_refused_disabled",
+                    logger.warning(
+                        "webhook_media_download_giving_up",
                         extra={**log_ctx, "phone": phone, "media_type": media_kind},
                     )
                 else:
-                    logger.info(
-                        "webhook_media_ignored_historical",
-                        extra={**log_ctx, "phone": phone, "media_type": media_kind},
-                    )
-                return
-
-            if not instance_token:
-                logger.error("webhook_no_instance_for_download", extra=log_ctx)
-                return
-
-            download = await wi.download_media_base64(instance_token, message_id)
-            if download is None:
-                logger.warning(
-                    "webhook_media_download_giving_up",
-                    extra={**log_ctx, "phone": phone, "media_type": media_kind},
-                )
-                return
-
-            base64_data, mimetype, size_bytes = download
-
-            _MAX_MEDIA_BYTES = 20 * 1024 * 1024
-            if size_bytes > _MAX_MEDIA_BYTES:
-                if not is_historical and instance_token:
-                    kind_label = {"audio": "áudio", "image": "imagem", "video": "vídeo", "document": "documento"}.get(media_kind, media_kind)
-                    await wa_service.send_text_message(
-                        instance_token=instance_token,
-                        phone=phone,
-                        text=f"Recebi seu {kind_label}, mas ele é muito grande para processar (máximo 20 MB). Por favor, envie um arquivo menor. 😊",
-                    )
-                logger.info(
-                    "webhook_media_too_large",
-                    extra={**log_ctx, "phone": phone, "media_type": media_kind, "size_bytes": size_bytes},
-                )
-                return
-
-            media_type = media_kind
-            media_mime_type = mimetype
-            media_size_bytes = size_bytes
-            media_url = f"data:{mimetype};base64,{base64_data}"
-            content = text  # caption (may be empty)
+                    base64_data, mimetype, size_bytes = download
+                    media_mime_type = mimetype
+                    media_size_bytes = size_bytes
+                    if size_bytes > _MAX_MEDIA_BYTES:
+                        skip_ai_reply = True
+                        pending_notice = (
+                            f"Recebi seu {kind_label}, mas ele é muito grande pra abrir por aqui "
+                            "(o limite é 20 MB). Consegue mandar um menor? 😊"
+                        )
+                        logger.info(
+                            "webhook_media_too_large",
+                            extra={
+                                **log_ctx, "phone": phone,
+                                "media_type": media_kind, "size_bytes": size_bytes,
+                            },
+                        )
+                    else:
+                        media_url = f"data:{mimetype};base64,{base64_data}"
 
         # ── Phase 1: persist inbound immediately ─────────────────────────────
         async with AsyncSessionLocal() as db:
@@ -601,6 +612,16 @@ async def _process_inbound_message(tenant: Tenant, data: dict, request_id: str |
                 "webhook_historical_saved",
                 extra={**log_ctx, "phone": phone, "age_s": int(time.time() - ts_s)},
             )
+            return
+
+        # Media we couldn't make usable: the message is already saved (visible in
+        # the Inbox), so here we only tell the patient and skip the AI turn —
+        # Sofia has nothing to read. Never notify a paused/human-handled contact.
+        if skip_ai_reply:
+            if pending_notice and instance_token and not ai_paused and not human_takeover:
+                await wa_service.send_text_message(
+                    instance_token=instance_token, phone=phone, text=pending_notice
+                )
             return
 
         if ai_paused:
@@ -880,6 +901,20 @@ async def _generate_and_send(
             if contact is None:
                 logger.warning("webhook_contact_missing", extra=log_ctx)
                 return
+
+            # Re-read the tenant FRESH from this session — not the snapshot
+            # captured at webhook receipt and carried, detached, through the
+            # whole debounce/typing-hold window. Clinic settings/prices/policies
+            # and ai_config must reflect the moment the reply is generated, so
+            # a price/config change made by staff DURING the window is honored.
+            # (The contact is already re-read above, so ai_paused/human_takeover/
+            # crm_stage are current; appointments + availability are queried at
+            # generate time in ai_stages/tools.) Re-attaching the tenant to THIS
+            # session also makes the usage-cap pause in _ai_usage_caps_allow_reply
+            # persist its settings write, which a detached object would drop.
+            fresh_tenant = await db.scalar(select(Tenant).where(Tenant.id == tenant.id))
+            if fresh_tenant is not None:
+                tenant = fresh_tenant
 
             if contact.ai_paused:
                 logger.info("webhook_ai_paused_late", extra=log_ctx)

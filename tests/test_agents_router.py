@@ -29,11 +29,17 @@ class TestParseDecision:
         decision = router.parse_decision(resp)
         assert decision.agents == ["sales", "booking"]
 
-    def test_handoff_never_combined_even_if_model_tries(self):
-        resp = fake_function_call("classify", {"agents": ["handoff", "sales"], "handoff_reason": "irritado"})
+    def test_handoff_is_now_an_invalid_agent_and_filtered_out(self):
+        # "handoff" is no longer a valid route (Sofia never hands off) — the
+        # router treats it like any other unknown name and drops it.
+        resp = fake_function_call("classify", {"agents": ["handoff", "sales"]})
         decision = router.parse_decision(resp)
-        assert decision.agents == ["handoff"]
-        assert decision.handoff_reason == "irritado"
+        assert decision.agents == ["sales"]
+
+    def test_handoff_only_falls_back_to_default(self):
+        resp = fake_function_call("classify", {"agents": ["handoff"]})
+        decision = router.parse_decision(resp)
+        assert decision.agents == ["sales"]
 
     def test_invalid_agent_names_filtered_out(self):
         resp = fake_function_call("classify", {"agents": ["not_a_real_agent", "booking"]})
@@ -46,11 +52,9 @@ class TestParseDecision:
         assert decision.agents == ["sales", "booking"]
 
     def test_more_than_two_agents_capped(self):
-        resp = fake_function_call("classify", {"agents": ["sales", "booking", "handoff"]})
+        resp = fake_function_call("classify", {"agents": ["sales", "booking", "sales"]})
         decision = router.parse_decision(resp)
-        # handoff filtered to sole item only if present after the cap; here
-        # the cap takes the first two (sales, booking) before handoff is
-        # ever considered, since we stop appending at 2.
+        # Cap takes the first two distinct valid agents (sales, booking).
         assert decision.agents == ["sales", "booking"]
 
     def test_empty_agents_falls_back_to_sales(self):

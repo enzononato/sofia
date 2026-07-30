@@ -1,255 +1,335 @@
 # Pendências antes de abrir o sistema ao público
 
-Lista viva do que falta para ir de "MVP funcional" para "pronto para vender ao público".
-Atualizada após a rodada de robustez (Waves 1-2: núcleo do atendimento, hardening da API,
-handoff/follow-ups, testes de integração, tetos de uso de IA, LGPD manual, migração de
-dependências de auth, mitigação de payload de mídia).
+Lista viva do que **falta**. Itens concluídos são removidos daqui (o histórico fica no git).
 
-Legenda: ✅ feito no código · 🔴 bloqueador · 🟡 recomendado · ⏳ só você pode fazer (painel externo)
+**Estado geral:** o núcleo funciona ponta a ponta — webhook → Sofia → resposta humanizada no
+WhatsApp, Inbox em tempo real (SSE), CRM, agenda, relatórios, equipe/convites, LGPD manual.
+Suíte automatizada: **200 testes puros** (`pytest tests/`, sem DB, ~2s) + **53 testes de
+integração** contra Postgres real (`tests/integration/`, Gemini e UAZAPI mockados).
+O que sobrou são pontos mortos de UI, dados fabricados em telas de configuração, limites de
+paginação que escondem pacientes, e as tarefas de painel externo que só você pode fazer.
 
----
-
-## ✅ Rodada de robustez (Waves 1-2) — resolvido no código
-
-Executada em duas ondas por subagentes em paralelo (ver `PLANO_EXECUCAO.md` para o
-diagnóstico e priorização original). Tudo abaixo tem testes automatizados cobrindo
-(99 testes puros + 39 de integração contra Postgres real, `tests/integration/`) e passou
-pelo checklist completo (pytest, alembic upgrade/downgrade round-trip, `tsc`, `npm run build`).
-
-**Atendimento da Sofia:**
-- [x] **Horário no passado oferecido/aceito no agendamento** — `check_availability` podia
-  oferecer 09:00 às 16h, e nada impedia criar um agendamento ontem. Agora rejeitado em
-  ambos os modos (capacity e por-profissional), com antecedência mínima configurável
-  (`MIN_BOOKING_LEAD_MINUTES`, default 30 min — **valor não confirmado por você, ver
-  dúvida aberta abaixo**). (`ai_tools.py`)
-- [x] **Falha do Gemini quebrando a persona** — erro na chamada mandava "problema técnico,
-  tente novamente" (tom de robô) e marcava a pergunta como respondida, perdendo-a. Agora
-  tenta de novo silenciosamente e, se falhar tudo, NÃO marca como respondida — a pergunta
-  volta a ser tratada na próxima mensagem do paciente. (`ai.py`)
-- [x] **Tool `confirm_appointment`** — a Sofia agora registra de verdade quando o paciente
-  confirma presença (em resposta a um lembrete ou espontaneamente), em vez de só dizer
-  "confirmado!" sem mudar nada no banco. (`ai_tools.py`)
-- [x] **Mensagens humanas pelo celular ignoradas** — quando alguém da equipe respondia
-  direto no WhatsApp/celular (sem passar pelo sistema), a Sofia nunca via essa mensagem e
-  podia contradizer o que já foi combinado. Agora é gravada no histórico, e a Sofia
-  **pausa automaticamente por 60 minutos** (renovado a cada mensagem humana) para não
-  disputar espaço com o atendente. (`webhooks.py`, `Contact.human_takeover_until`)
-- [x] **Reengajamento genérico** — a mensagem de "sumiu, volta aqui" agora menciona o
-  interesse real do paciente na conversa (quando há sinal claro), em vez de um texto
-  sempre igual. (`ai.py::generate_followup_message`, `followups.py`)
-- [x] **Lembrete de agendamento sempre com o mesmo texto** — 6 variações, sorteadas a
-  cada envio. (`followups.py`)
-- [x] **Tetos de uso diário de IA** — 40 respostas/contato/dia e 400/clínica/dia (valores
-  que você aprovou); ao estourar, pausa e envia alerta por e-mail em vez de continuar
-  respondendo sem limite. **Já LIGADO por padrão** (`AI_USAGE_LIMITS_ENABLED=True`).
-- [x] **Alerta ativo de handoff** — quando a Sofia transfere para humano, agora envia
-  e-mail para `tenant.email` (desativável em Configurações → Follow-ups), além do badge
-  visual. Novo job a cada 10 min alerta se um contato pausado ficar sem resposta humana
-  por tempo demais (`HANDOFF_ALERT_JOB_MINUTES`).
-- [x] **UI com dados fabricados removida** — card "Análise de Presença Online" (85%/+12%
-  inventados) e botão "Sofia Insights" sem função, ambos removidos do painel.
-
-**Segurança e isolamento:**
-- [x] **Webhook do WhatsApp fail-open sem segredo** — agora rejeita por padrão quando o
-  tenant não tem `webhook_secret` gravado (antes aceitava qualquer request). Comparação
-  agora é constant-time. **Tenants antigos sem secret vão parar de receber mensagens até
-  reconectar o WhatsApp** — verifique isso nos logs de boot (WARNING por tenant afetado).
-- [x] **Duplicação de mensagem em entrega concorrente do webhook** — constraint real de
-  unicidade no banco (antes só uma checagem em código, que não protegia contra corrida).
-- [x] **`PATCH /tenants/me` aceitando sobrescrever segredos** — um admin da clínica podia,
-  sem querer ou não, sobrescrever `webhook_secret`/`token` do WhatsApp via um PATCH normal
-  de configurações, ou se auto-promover de plano. Ambos bloqueados agora.
-- [x] **Profissional lendo conversa de paciente de outro profissional** — a listagem já
-  filtrava certo, mas os endpoints de detalhe/mensagens/edição de contato não. Corrigido
-  em todos os pontos.
-- [x] **Bug real de segurança encontrado pelos testes**: a revogação de família de refresh
-  token (proteção contra reuso de token roubado) era descartada por rollback — o token
-  irmão do atacante continuava válido mesmo depois do sistema "detectar" o roubo. Corrigido
-  e coberto por teste de regressão. (`app/services/tokens.py`)
-- [x] **`python-jose`/`passlib` (sem manutenção ativa) substituídos** por `PyJWT` e uso
-  direto de `bcrypt` — sem quebra de compatibilidade (tokens e senhas já existentes
-  continuam válidos, testado manualmente).
-
-**Recuperação e resiliência:**
-- [x] **Mensagem perdida se o servidor reiniciar durante a janela de espera** — uma
-  varredura no boot recupera conversas com mensagem do paciente sem resposta.
-
-**LGPD (manual, conforme sua decisão — sem automação de retenção):**
-- [x] **Exportação de dados do paciente** — `GET /contacts/{id}/export`.
-- [x] **Anonimização/"direito ao esquecimento"** — `POST /contacts/{id}/anonymize`
-  (irreversível; limpa também o telefone, então uma mensagem futura desse número vira um
-  contato novo em vez de reativar o antigo).
-
-**Performance/payload:**
-- [x] **Payload de mídia inflando listagem do Inbox e a memória da IA** — a listagem de
-  contatos e o histórico interno que a IA lê não carregam mais o `media_url` (só a
-  conversa aberta, que precisa de verdade). Medido: ~4,27MB → 883 bytes por contato na
-  listagem, num teste com 2 fotos.
-
-**Testes (novos, cobrindo tudo acima):**
-- [x] Suíte de integração com Postgres real (`tests/integration/`) — isolamento entre
-  clínicas, autenticação, webhook (fail-closed, idempotência, auto-pausa, tetos de IA,
-  `confirm_appointment`), e os dois endpoints de LGPD. 39 testes.
-- [x] Harness de teste E2E manual contra o Gemini real (`scripts/e2e_sofia.py`) — 9
-  cenários prontos (agendamento feliz, data relativa, horário passado, preço/parcelamento
-  não configurados, objeção de preço, pedido de humano, confirmação pós-lembrete, "você é
-  um robô?"). **Só roda manualmente** (`venv\Scripts\python scripts\e2e_sofia.py
-  --scenario <nome>`) — cada rodada com `--all` custa dinheiro real de API, nunca
-  automatize isso. Ainda não foi rodado por completo — recomendo rodar antes do próximo
-  redeploy para validar visualmente as conversas.
-
-> ⚠️ **Tudo isso só chega aos pacientes após o REDEPLOY em produção** (ver bloqueador abaixo).
+Legenda: 🔴 bloqueador · 🟡 recomendado · ⏳ só você pode fazer (painel externo) · 🟢 bom ter
 
 ---
 
-## 🔴 Novo bloqueador desta rodada
+## 🔴 Bloqueadores — código
 
-- [ ] ⏳ **Rotacionar a `GEMINI_API_KEY` de novo** — durante esta rodada, um agente
-  copiou o `.env` e a chave real acabou aparecendo em texto claro num arquivo de log local
-  de transcript (não foi publicado nem enviado a lugar nenhum, mas rotacionar é a prática
-  seguro). Gere uma nova chave e atualize `.env` local + EasyPanel.
+- [ ] **A landing page `/` ainda é o template do create-next-app**
+  (`frontend/src/app/page.tsx`) — logo do Next.js e links para `vercel.com/new`,
+  `nextjs.org/docs` e `nextjs.org/learn`. Qualquer visitante que abrir a raiz do domínio vê
+  isso. Precisa virar uma landing real ou, no mínimo, um redirect para `/login`.
 
-## Dúvidas abertas (defaults assumidos — confirme ou ajuste)
+- [ ] **Não existe recuperação de senha em lugar nenhum.**
+  - `app/api/v1/routes/auth.py` tem apenas signup/login/refresh/logout/accept-invite —
+    nenhum `forgot-password` / `reset-password`.
+  - O link "Esqueceu?" na tela de login (`frontend/src/app/login/page.tsx:196`) é
+    `href="#"` — botão morto.
+  - O backend **já aceita** trocar senha (`PATCH /users/{id}` com `password`, ver
+    `app/api/v1/routes/users.py:271`), mas o painel nunca expõe isso: `UserUpdate` em
+    `frontend/src/hooks/useTeam.ts:33` só tem `full_name/role/is_active`, e o campo de senha
+    do modal de Equipe só aparece na criação.
+  - Resultado prático: recepcionista que esquece a senha fica travada e só se resolve com
+    acesso direto ao banco. Para um SaaS aberto ao público, isso é bloqueador.
 
-- **Antecedência mínima para agendar no mesmo dia**: adotei 30 minutos
-  (`MIN_BOOKING_LEAD_MINUTES`). Ajuste se quiser outro valor.
-- **Limiar do alerta de "pausado esquecido"**: 30 minutos sem resposta humana após o
-  handoff. Ajuste se quiser outro valor.
-- **E-mail de destino dos alertas** (handoff, teto de IA, "pausado esquecido"): hoje vai
-  para `tenant.email` (o cadastro da própria clínica). Se preferir um e-mail operacional
-  separado, isso precisa de um campo novo.
+- [ ] **"Feriados e Datas Especiais" é 100% falso** —
+  `frontend/src/components/settings/schedule-tab.tsx:259-307`. Dois feriados chumbados no
+  código ("Independência do Brasil 07/09" e "Nossa Sra. Aparecida 12/10"), botão
+  "Adicionar Data" **sem `onClick`**, e os "X" de remover também **sem `onClick`**. Não existe
+  campo de feriados em `TenantSettings` nem no backend, e `check_availability`
+  (`app/services/ai_tools.py`) não sabe o que é feriado. A clínica olha essa tela, acredita
+  que está fechada nessas datas, e a Sofia agenda paciente normalmente. Ou implementa de
+  verdade (campo em `settings.schedule.holidays` + filtro na disponibilidade) ou remove a
+  seção — deixar como está é pior que não ter.
 
----
-
-## ✅ Resolvido no código (rodada anterior)
-
-- [x] **Fuso horário / datas erradas** — o default caía em UTC, então clínicas sem
-  timezone configurado (o caso real) tinham a data "virando" para o dia seguinte à
-  noite. Default agora é `America/Sao_Paulo`. (`ai_tools.py`)
-- [x] **Sofia confundindo contexto antigo** — o histórico ia para o modelo sem
-  nenhuma marca de tempo, então mensagens de dias atrás pareciam atuais (agendamento
-  fantasma, assunto velho retomado). Agora mensagens antigas levam marcador
-  `[dia dd/mm/aaaa hh:mm]`. (`ai.py`)
-- [x] **Crash com resposta vazia do Gemini** — `parts=None` (thinking estourando o
-  limite de tokens) quebrava a resposta. Thinking desligado + guarda contra vazio. (`ai.py`)
-- [x] **Preço R$ 0,00** — serviço sem preço (price 0/nulo) fazia a Sofia dizer
-  "R$ 0,00". Agora vira "valor avaliado na consulta", no backend (tool) e no frontend
-  (badge "Valor na consulta"). (`ai_tools.py`, `services/page.tsx`)
-- [x] **Atendimento multimodal** — prompt reforçado para responder ao CONTEÚDO de
-  foto/áudio (comum em estética), ligar a um serviço real e conduzir à avaliação, sem
-  diagnosticar. Pipeline testado. (`ai.py`)
-- [x] **Técnica de vendas / objeções / classificação frio-quente** — playbook de
-  objeções, técnicas de fechamento, e classificação de CRM (hot/cold lead). (`ai.py`, `ai_tools.py`)
-- [x] **Default de modelo deprecado** — `gemini-2.0-flash` trocado por
-  `gemini-2.5-flash` no frontend, backend e `.env.example`.
-- [x] **Alertas de erro por e-mail** — handler que envia e-mail em log de nível ERROR,
-  em thread separada (não bloqueia) e com throttle anti-tempestade. Desligado por
-  padrão; ligar via `ALERT_EMAIL_ENABLED=true` + SMTP no `.env`/EasyPanel. (`app/core/alerting.py`)
-- [x] **Sofia inventando parcelamento ("até 3x")** — conversa real mostrou a Sofia
-  afirmando um número de parcelas que não existe nos dados. Novo campo estruturado
-  `max_installments` na aba Clínica (Configurações → formas de pagamento); a tool
-  `get_clinic_info` agora expõe o valor (ou avisa "não configurado — não invente") e o
-  prompt proíbe citar parcelas sem o dado. Reproduzido e validado com o cenário real.
-  (`ai_tools.py`, `ai.py`, `clinic-tab.tsx`, `useSettings.ts`)
-- [x] **Deploy que morria se o Postgres não estivesse resolvível** — o CMD do Dockerfile
-  agora tenta a migração 12x com 5s de pausa antes de desistir (corrida de DNS do
-  EasyPanel vista nos logs de deploy). (`Dockerfile`)
-
-> ⚠️ **Tudo isso só chega aos pacientes após o REDEPLOY em produção** (ver bloqueador abaixo).
+- [ ] **Inbox, Calendário e CRM só enxergam a primeira página de contatos.**
+  `useContacts()` (`frontend/src/hooks/useInbox.ts:48`) chama `/contacts` **sem `limit`**, ou
+  seja, `DEFAULT_PAGE_LIMIT = 50` (`app/config.py:172`). Não há paginação nem scroll infinito
+  em lugar nenhum. Cascata de consequências reais assim que a clínica passar de 50 pacientes:
+  - **Busca do Inbox não acha ninguém antigo** — `contact-list.tsx:23` filtra **no cliente**
+    sobre esses 50, enquanto o backend já suporta `?search=` server-side (usado só pela página
+    Pacientes). O usuário digita o nome e vê "Nenhum paciente encontrado".
+  - **Não dá para agendar paciente antigo** — o `<select>` de paciente em
+    `appointment-modal.tsx:166` lista apenas esses 50, e não tem busca.
+  - **A agenda mostra "Paciente" no lugar do nome** — `daily-timeline.tsx:112` faz
+    `contacts.find(...)` e cai no fallback `"Paciente"` quando o contato não está nos 50.
+  - **O badge da sidebar subconta** — `sidebar.tsx:42` conta `ai_paused` só nos 50.
+  - **O deep-link `?contact=<id>` da página Pacientes falha em silêncio** —
+    `inbox-layout.tsx:24` só abre a conversa se o id estiver na lista já carregada.
+  - CRM (`useCrm.ts:37`, `limit: 200` = teto máximo) e Pacientes (`usePatients.ts:48`,
+    `limit: 100`) truncam sem avisar. Em Pacientes, os cards "Total de Pacientes /
+    Leads Quentes / Sofia Pausada" contam `patients.length` (a página buscada), não
+    `meta.total` — então a partir de 100 contatos o "Total" mostra 100 para sempre.
 
 ---
 
 ## 🔴 Bloqueadores — só você pode fazer (painéis externos)
 
-- [ ] ⏳ **Redeploy do backend + frontend no EasyPanel** — PARCIAL
-  - ✅ Backend redeployado em 07/07 (logs confirmam: migração `c3d4e5f6a7b8` aplicada,
-    app saudável). Porém os commits de 07/07 à tarde (parcelamento, retry do deploy)
-    exigem **novo** redeploy do backend + rebuild do frontend (campo de parcelas na aba Clínica).
-  - Frontend: confirmar se já foi redeployado com o design novo.
+- [ ] ⏳ **Rotacionar a `GEMINI_API_KEY`** — a chave real vazou em texto claro num arquivo de
+  transcript local numa rodada anterior (não foi publicada em lugar nenhum, mas rotacionar é a
+  prática segura). Gere uma nova e atualize `.env` local + EasyPanel.
 
-- [ ] ⏳ **Rotacionar credenciais expostas no chat**
-  - Admin token da UAZAPI (`UAZAPI_ADMIN_TOKEN`) e a API key do Google (Stitch).
-  - Gerar novas em cada painel e atualizar no `.env` local **e** no EasyPanel.
+- [ ] ⏳ **Rotacionar as demais credenciais expostas em chat** — admin token da UAZAPI
+  (`UAZAPI_ADMIN_TOKEN`) e a API key do Google (Stitch). Gerar novas em cada painel e atualizar
+  no `.env` local **e** no EasyPanel.
+
+- [ ] ⏳ **Redeploy do backend + rebuild do frontend no EasyPanel** — nada do que foi feito
+  desde o último deploy (remoção do handoff, releitura de estado fresco no `_generate_and_send`,
+  copiloto "Sugerir resposta", SSE do Inbox, filtro por profissional no calendário) chega aos
+  pacientes sem isso.
 
 - [ ] ⏳ **LGPD — política de privacidade + base legal** (dados de saúde no Brasil)
   - Publicar política de privacidade linkável.
   - Definir base legal para tratamento de dados de pacientes.
-  - **Decisão registrada:** a Sofia vai **continuar se passando por atendente humana**
-    (sem aviso de "sou uma IA"), por escolha de negócio. Isso é legítimo, mas **aumenta**
-    a importância da política de privacidade e da base legal — não reduz. Reavaliar com
-    apoio jurídico antes do lançamento público amplo.
-  - ✅ **Suporte técnico já existe** (rodada de robustez): exportação e anonimização
-    manuais de dados do paciente, sob demanda da equipe da clínica (ver seção acima).
-    Automação de retenção/exclusão automática continua **fora de escopo** por decisão sua
-    — só implementar com um go-ahead explícito.
+  - **Decisão registrada:** a Sofia continua se passando por atendente humana (sem aviso de
+    "sou uma IA"), por escolha de negócio. Isso é legítimo, mas **aumenta** a importância da
+    política e da base legal — não reduz. Reavaliar com apoio jurídico antes do lançamento
+    público amplo.
 
 - [ ] ⏳ **Configurar Google Calendar OAuth no Google Cloud Console**
   - Criar projeto, habilitar Google Calendar API, tela de consentimento OAuth.
   - Criar credenciais (Client ID + Secret) com os redirect URIs corretos.
   - `GOOGLE_CLIENT_ID` / `GOOGLE_CLIENT_SECRET` / `GOOGLE_REDIRECT_URI` no `.env` e EasyPanel.
   - Para uso público sem aviso de "app não verificado": submeter para verificação do Google.
+  - Enquanto isso não existe, o job `gcal_reconcile` nem sequer é registrado
+    (`app/services/scheduler.py:52`) e todo o módulo é no-op.
 
 ---
 
+## 🟡 Recomendado — código
+
+- [ ] **Dados fabricados ainda presentes nas telas de Configurações.** O painel principal já foi
+  limpo, mas duas abas continuam mostrando números inventados como se fossem métricas reais:
+  - `settings/followups-tab.tsx:264-283` — card "Resumo da Atividade": "Lembretes hoje **128**",
+    "Leads reengajados **12**", barra fixa em `w-3/4` com "Eficiência das Automações: **75%**".
+    Tudo chumbado.
+  - `settings/followups-tab.tsx:259` — "reduzem o No-show em até **34%**" (estatística
+    inventada).
+  - `settings/followups-tab.tsx:295` — preview do WhatsApp chumba o nome de outra clínica
+    ("Lumina Clinic") em vez de usar `tenant.name`.
+  - `settings/schedule-tab.tsx:334-358` — card "Resumo de Atendimento": "48 horas",
+    "14 pacientes/dia", "8 turnos", barra em 82% com "82% OCUPADA". Tudo chumbado.
+  - `settings/schedule-tab.tsx:322-330` — "Dica da Sofia" afirma "Notei que suas segundas-feiras
+    costumam ter alta demanda" (nenhuma análise existe) e o botão **"Aplicar Sugestão" não tem
+    `onClick`**.
+  - `settings/schedule-tab.tsx:367` — "Ver Tutorial" com `href="#"`.
+
+- [ ] **"Canal de envio prioritário" (WhatsApp / E-mail) é decorativo** —
+  `settings/followups-tab.tsx:128-143`: dois `<button>` sem `onClick`, sem estado, sem
+  persistência. Pior: o cabeçalho da seção diz "Envio automático via WhatsApp **e E-mail**",
+  mas `app/services/followups.py` só envia por WhatsApp — não existe canal de e-mail para
+  lembretes. Remover os botões e corrigir o texto, ou implementar o canal.
+
+- [ ] **O Inbox só carrega as últimas 25 mensagens e não tem como ver o histórico antigo.**
+  `useMessages` (`frontend/src/hooks/useInbox.ts:76`) manda `limit: MESSAGES_POLL_LIMIT` (25)
+  **também na primeira carga**, e `chat-window.tsx` não tem nenhum handler de scroll-up nem
+  botão "carregar mais". O comentário no próprio `useInbox.ts` afirma que o histórico completo
+  vem "ao rolar para cima" — esse caminho não existe no código. Conversa longa fica com o começo
+  inacessível pelo painel.
+
+- [ ] **A pausa por atendimento humano é invisível no painel.** `Contact.human_takeover_until`
+  (pausa automática de 60 min quando alguém da equipe responde direto pelo celular) **não está
+  em `ContactRead`** (`app/schemas/contact.py:47`), então o frontend não recebe esse campo. O
+  chat mostra "Secretária IA: **Ativa**" enquanto a Sofia está calada, e ninguém entende por
+  quê. Expor o campo e mostrar um badge tipo "pausada até HH:MM (atendimento humano)".
+
+- [ ] **LGPD implementada no backend, inalcançável pelo painel (funcionalidade órfã).**
+  `GET /contacts/{id}/export` e `POST /contacts/{id}/anonymize`
+  (`app/api/v1/routes/privacy.py`) existem, têm 7 testes de integração e nenhuma UI: nenhum
+  hook do frontend chama `/export` ou `/anonymize`. Na prática, atender um pedido de acesso ou
+  de esquecimento hoje exige curl/Postman. Um botão na página Pacientes (exportar JSON) e um
+  em modal de confirmação (anonimizar, só owner/admin) fecham isso.
+
+- [ ] **A Sofia multi-agente está pronta e desligada, sem nenhum jeito de ligar pela UI.**
+  `AI_MULTI_AGENT_ENABLED = False` (`app/config.py:206`); o override por clínica é
+  `tenant.ai_config["multi_agent_enabled"]`, que nenhuma tela escreve (a aba IA em
+  `settings/ai-tab.tsx` só gerencia model/temperature/max_tokens/multimodal/scheduling_mode).
+  São ~880 linhas em `app/services/agents/` + 35 testes puros + 2 de integração rodando como
+  código morto em produção. Decidir: expor um toggle (mesmo que escondido/admin) para canariar
+  em 1-2 clínicas, ou assumir que fica desligado.
+
+- [ ] **Sincronização com Google Calendar é só de ida.** `app/services/google_calendar.py`
+  empurra agendamentos do SaaS para o Google, mas `check_availability`
+  (`app/services/ai_tools.py`) nunca consulta o free/busy do profissional — não há nenhuma
+  chamada de `freeBusy` no código. Um compromisso pessoal bloqueado no Google Agenda do
+  profissional não impede a Sofia de marcar por cima. Relevante justamente no modo
+  "por profissional", que é o default.
+
+- [ ] **`/docs`, `/redoc` e `/openapi.json` são públicos em produção** — estão em
+  `_PUBLIC_PATHS` (`app/middleware/tenant.py:36-42`) sem nenhuma condição de `DEBUG`. Toda a
+  superfície da API fica documentada para qualquer um. Desabilitar fora de `DEBUG`
+  (`docs_url=None` em `app/main.py:86`) ou proteger com auth.
+
+- [ ] **Não existe cadastro manual de paciente.** Não há `POST /contacts` no backend — um
+  contato só nasce de uma mensagem no WhatsApp (`webhooks.py`). Paciente que ligou, ou que a
+  clínica quer pré-cadastrar antes do primeiro contato, não tem como entrar no sistema, e por
+  consequência não tem como ser agendado.
+
+- [ ] **Pausa da Sofia: semântica inconsistente e kill-switch invisível.**
+  - Responder pelo painel (`contacts.py`, `send_manual_message`/`send_media_message`) faz
+    `ai_paused = True` **permanente** — a recepcionista responde uma vez e a Sofia fica muda
+    para aquele paciente indefinidamente, inclusive no sábado à noite. O mesmo ato feito pelo
+    celular gera janela de 60 min que expira sozinha. Unificar na janela auto-expirante,
+    deixando o toggle do header para a pausa permanente explícita.
+  - O teto diário por clínica escreve `tenant.settings["ai_paused"] = True`, o que **desliga a
+    Sofia para a clínica inteira**, e não existe nenhuma UI para ver ou limpar isso (só
+    editando o banco). Falta um banner no dashboard com botão "Reativar Sofia" — o
+    `PATCH /tenants/me` já faz deep-merge de `settings`, não precisa de endpoint novo.
+  - Consequência hoje: o filtro "Aguardando Humano" e o badge da sidebar acumulam para sempre
+    toda conversa que alguém já respondeu uma vez — a métrica vira ruído.
+
+- [ ] **O painel não mostra nada sobre a Sofia — maior gap de retenção.** `GET /reports/overview`
+  traz leads, conversão, no-show e volume de mensagens, mas nada responde "o que a Sofia fez por
+  mim este mês?". Os dados já existem, exceto um campo: `Message.ai_model_used IS NOT NULL` dá
+  as respostas dela, `crm_stage_source='ai'` dá os leads que ela qualificou, e o tempo de
+  primeira resposta sai dos timestamps. Falta apenas `Appointment.created_by` (`"ai" | "staff"`)
+  para poder dizer quantos agendamentos ela gerou.
+
+- [ ] **`attended`/`no_show` são zumbis e o KPI de no-show mente.** Nada marca um agendamento
+  como concluído ou faltado automaticamente; depende de alguém abrir o modal do calendário todo
+  dia. Na prática a coluna "Compareceu" do Kanban fica vazia, `no_show_rate` mostra 0% para
+  sempre, e o estágio `post_care` nunca acontece. Uma lista "pendentes de fechamento"
+  (agendamentos cuja data já passou e ainda estão `scheduled`/`confirmed`) com dois botões
+  resolve sem automação escondida.
+
+- [ ] **Remarcação/cancelamento feitos no painel não avisam o paciente.**
+  `PATCH /appointments/{id}` altera a data e só sincroniza o Google Calendar. A recepcionista
+  remarca e o paciente aparece no horário antigo.
+
+- [ ] **Tool writes são commitados antes da checagem de "resposta superada".** Em
+  `_generate_and_send`, o `commit()` acontece antes de `_has_newer_inbound`. Se o paciente
+  escreveu enquanto a Sofia "digitava", a resposta é abortada — mas o `create_appointment` já
+  foi gravado e ele nunca recebeu a confirmação. Ele acha que não agendou; a agenda diz que sim.
+
+- [ ] **A memória efetiva da Sofia é ~metade do que parece.** `AI_HISTORY_LIMIT=20`, mas cada
+  resposta dela vira uma `Message` por PARTE (o `[[BREAK]]` divide antes de salvar). Com
+  respostas de 2-3 partes, 20 mensagens cobrem só ~5 trocas reais — é isso que faz ela
+  "esquecer" o que foi combinado 10 minutos antes. Coalescer turnos consecutivos do mesmo papel
+  em `build_conversation_contents` resolve sem aumentar custo.
+
+- [ ] **Textos de sistema quebram a persona** — "só consigo responder mensagens de texto",
+  "muito grande para processar", "tive um probleminha para processar sua mensagem". Além do tom
+  robótico, alguns são enviados fora do pipeline de humanização (sem read receipt, sem
+  "digitando", sem delay), então chegam instantaneamente enquanto todo o resto demora ~20s — o
+  que os denuncia ainda mais.
+
+- [ ] **Dois fallbacks de erro contradizem a decisão de "ficar em silêncio".** O
+  `AIGenerationError` foi desenhado para não mandar texto robótico e não marcar a rajada como
+  respondida. Mas os outros dois caminhos de falha (candidato vazio após retry, e loop de tools
+  esgotado) retornam texto normalmente — ele é enviado E a pergunta do paciente é marcada como
+  respondida, perdendo-a para sempre.
+
+- [ ] **Lacunas concretas de teste** (não é "escrever mais testes" genérico — são caminhos que
+  mandam mensagem/e-mail para paciente real ou fazem controle de acesso, hoje sem nenhuma
+  cobertura):
+  - `app/services/followups.py` — os guards de envio proativo já têm 20 testes puros
+    (`tests/test_followups_guards.py`), mas os 3 jobs em si continuam sem teste de ponta a
+    ponta: janelas de lembrete, anti-duplicidade via `Appointment.reminders`, cooldown de
+    reengajamento e deduplicação de "episódio" via `Contact.handoff_alerted_at`. Um bug aqui
+    manda mensagem repetida para paciente.
+  - `app/api/v1/routes/users.py` + convites + `POST /auth/accept-invite` — **zero testes**.
+    Ficam sem cobertura as guardas de escalonamento de privilégio: "só OWNER cria OWNER",
+    "não é possível convidar como proprietário", revogação e expiração de convite,
+    `revoke_all_user_tokens` na troca de senha/desativação.
+  - `app/api/v1/routes/appointments.py` — a constraint de sobreposição
+    (`no_overlap_per_professional` → 409), o `cancellation_reason` obrigatório no cancelamento
+    e o recálculo de `ends_at` não têm teste.
+  - `app/api/v1/routes/reports.py` — só há teste de isolamento entre clínicas
+    (`test_tenant_isolation.py:262`); a agregação em si (`conversion_rate`, `no_show_rate`,
+    séries com dias vazios) nunca é verificada.
+  - `app/services/google_calendar.py` — zero testes.
+
+- [ ] **Ajustes pequenos, todos verificados:**
+  - `dashboard/navbar.tsx:52` — o rótulo de papel cai em "Profissional" para
+    `receptionist` e `viewer`; uma recepcionista vê "Profissional" no cabeçalho.
+  - `inbox/inbox-layout.tsx:14` — `error` é desestruturado de `useContacts()` e nunca usado:
+    se `/contacts` falhar, o Inbox mostra "Nenhum paciente encontrado" para sempre, sem
+    estado de erro.
+  - `settings/followups-tab.tsx:232` — o texto do alerta ainda diz "quando a Sofia transfere
+    uma conversa para a equipe". A Sofia não transfere mais nada; hoje o alerta dispara por
+    teto de uso de IA ou pausa manual no Inbox. Reescrever o rótulo.
+  - `app/services/alerts.py:41,65` — o corpo dos e-mails de alerta também descreve
+    transferência ("A Sofia transferiu esta conversa para a equipe"). Mesmo ajuste.
+
+---
+
+## 🟡 Multi-agente — consertado, aguardando piloto
+
+Você optou por consertar e ligar. O trabalho de código está feito: prompts unificados numa
+fonte única (), tools alinhadas por agente (Sales ganhou
+// por ser a rota padrão do
+Router; Booking ganhou ), e 17 invariantes de prompt travadas por teste.
+O toggle por clínica está em **Configurações → IA → "Atendimento por especialistas (beta)"**.
+
+- [ ] ⏳ **Ativar em UMA clínica de teste primeiro** e acompanhar as conversas. Custa de 2 a 3
+  chamadas ao Gemini por mensagem (contra 1 hoje), então o custo sobe proporcionalmente.
+- [ ] **Limitar partes no modo composite** — dois especialistas × até 3 partes dá até 6 mensagens
+  seguidas no WhatsApp, contra a regra de "prefira 1, máximo 3". O segundo especialista também
+  não sabe que o primeiro já fez um convite, então podem sair dois CTAs na mesma resposta.
+- [ ] **Rodar o harness E2E manual nos dois caminhos** antes de considerar fechado
+  (). Custa dinheiro de API; os transcripts que existem no repo são de
+  07/07 e são anteriores a praticamente todas as regras atuais.
+
 ## 🟡 Recomendado — só você pode fazer (produção/infra)
 
-- [ ] ⏳ **1 único worker do backend no EasyPanel** — scheduler e message batcher são
-  estado em memória; 2+ workers duplicam lembretes e quebram o debounce silenciosamente.
-- [ ] ⏳ **`SECRET_KEY` e `ENCRYPTION_KEY` fortes em produção** — não podem ser os
-  defaults do `.env.example`. (O backend já recusa subir com SECRET_KEY fraca fora de DEBUG.)
-- [ ] ⏳ **Backup do banco (Postgres)** — confirmar backup automático do EasyPanel ou `pg_dump` agendado.
-- [ ] ⏳ **Ligar os alertas de e-mail** — código pronto; preencher `ALERT_*` no EasyPanel
-  (`ALERT_EMAIL_ENABLED=true` + SMTP). Sugestão: e-mail dedicado com senha de app.
-- [ ] ⏳ **Cadastrar os dados reais da clínica** — o tenant real tem serviços com preço 0
-  e **sem horário de funcionamento configurado**. O código agora lida com isso graciosamente,
-  mas para a Sofia informar preços e horários corretos, a clínica precisa preencher:
-  preços dos serviços, horário de funcionamento (dias, abertura/fechamento) e timezone.
+- [ ] ⏳ **1 único worker do backend no EasyPanel** — scheduler e message batcher são estado em
+  memória; 2+ workers duplicam lembretes e quebram o debounce silenciosamente.
+- [ ] ⏳ **`SECRET_KEY` e `ENCRYPTION_KEY` fortes em produção** — não podem ser os defaults do
+  `.env.example`. (O backend já recusa subir com `SECRET_KEY` fraca fora de `DEBUG` —
+  `app/config.py:216`.)
+- [ ] ⏳ **Backup do banco (Postgres)** — confirmar backup automático do EasyPanel ou `pg_dump`
+  agendado.
+- [ ] ⏳ **Ligar os alertas de e-mail** — código pronto (`app/core/alerting.py`); preencher os
+  `ALERT_*` no EasyPanel (`ALERT_EMAIL_ENABLED=true` + SMTP). Sugestão: e-mail dedicado com
+  senha de app. Sem isso, os alertas de teto de uso de IA e de "pausado e esquecido" não saem.
+- [ ] ⏳ **Cadastrar os dados reais da clínica** — o tenant real tem serviços com preço 0 e
+  **sem horário de funcionamento configurado**. O código lida com isso graciosamente, mas para a
+  Sofia informar preços e horários corretos a clínica precisa preencher: preços dos serviços,
+  horário de funcionamento (dias, abertura/fechamento), timezone, parcelamento máximo e a
+  política de avaliação (aba Clínica).
 - [ ] ⏳ **Testar o fluxo por profissional de ponta a ponta em produção** — configurar um
-  profissional (serviços + horários), agendar via WhatsApp, confirmar atribuição e o evento
-  no Google Calendar. A lógica está implementada e revisada, mas nunca exercida em produção.
+  profissional (serviços + horários), agendar via WhatsApp, confirmar a atribuição e o evento no
+  Google Calendar. A lógica está implementada e revisada, mas nunca foi exercida em produção.
+- [ ] ⏳ **Rodar o harness E2E manual contra o Gemini real antes do próximo redeploy** —
+  `venv\Scripts\python scripts\e2e_sofia.py --list` para ver os cenários. Custa dinheiro de API
+  a cada rodada; nunca automatizar. Nunca foi rodado por completo.
+
+---
+
+## Dúvidas abertas (defaults assumidos — confirme ou ajuste)
+
+- **Antecedência mínima para agendar no mesmo dia**: 30 minutos
+  (`MIN_BOOKING_LEAD_MINUTES`, `app/config.py:50`).
+- **Limiar do alerta de "pausado e esquecido"**: 30 minutos sem resposta humana
+  (`HANDOFF_ALERT_STALE_MINUTES`).
+- **E-mail de destino dos alertas** (teto de IA, "pausado esquecido"): hoje vai para
+  `tenant.email` (o cadastro da própria clínica). Se preferir um e-mail operacional separado,
+  isso precisa de um campo novo.
 
 ---
 
 ## 🟢 Bom ter (pode esperar o pós-lançamento)
 
-Os 3 itens do [`PLANO_IMPLEMENTACAO.md`](PLANO_IMPLEMENTACAO.md) foram **implementados**:
-
-- [x] **Handoff humano** (Item 1) — tool `request_human_handoff` pausa a Sofia (`ai_paused`,
-  unidirecional) quando o paciente pede humano, está irritado ou relata urgência.
-- [x] **Testes automatizados** (Item 2) — suíte pytest (`tests/`, `pytest.ini`,
-  `requirements-dev.txt`): 51 testes puros (sem DB, sem Gemini). `venv\Scripts\python -m pytest tests/ -q`.
-- [x] **Página "Pacientes" dedicada** (Item 3) — `/dashboard/patients` com busca, filtro por
-  estágio, badge de Sofia pausada e edição; deep-link `?contact=<id>` para o Inbox.
-- [ ] **Confirmar presença "digitando" com log real** em produção.
-- [ ] **Termos de uso / contrato de adesão** para as clínicas clientes.
-- [ ] **Teste de carga** com múltiplos tenants simultâneos.
-
-## ✅ Correções desta rodada (a partir de conversa real)
-
-- [x] **Sofia se revelou como IA** — regra absoluta no prompt: ela é uma pessoa para o paciente,
-  nunca diz/insinua que é IA/robô; removido "virtual" das identidades internas.
-- [x] **Sofia inventou que a consulta é "de graça"** — nova política estruturada de avaliação
-  na aba Clínica (gratuita / com custo / abate no procedimento). Sem configurar, ela não afirma
-  nem grátis nem pago.
-- [x] **Áudio não entendido** — quando o paciente mandava 2 áudios seguidos, só o último ia para
-  a IA. Agora todas as mídias da rajada são enviadas juntas.
-- [x] **Logs visuais** — formatter de texto legível (ícones + rótulos pt-BR); `LOG_FORMAT=text`
-  virou o padrão (console do EasyPanel fica legível sem configurar nada).
-
-> ⚠️ Tudo isso exige **novo redeploy** do backend + frontend para valer em produção.
-> E preencher, na aba Clínica: parcelamento máximo e a política de avaliação.
+- [ ] Confirmar a presença "digitando" com log real em produção (a UAZAPI precisa estar
+  enviando o evento `presence`; a lista de eventos só é reaplicada quando a clínica **reconecta**
+  o WhatsApp).
+- [ ] Termos de uso / contrato de adesão para as clínicas clientes.
+- [ ] Teste de carga com múltiplos tenants simultâneos.
+- [ ] Exclusão de serviço e remoção de membro da equipe — hoje só existe desativar
+  (`is_active`), sem `DELETE` no backend. Aceitável, mas some da UI que existe uma diferença.
 
 ---
 
 ## Rotina de verificação após qualquer mudança de código
+
 ```bash
 # Backend
 venv\Scripts\python -c "import app.main; print('OK')"
-venv\Scripts\python -m pytest tests/ -q              # suíte pura (rápida, sem DB)
+venv\Scripts\python -m pytest tests/ -q              # suíte pura (200 testes, ~2s, sem DB)
 
 # Backend — suíte de integração (Postgres real, sem custo de Gemini — tudo mockado)
 docker compose up -d
-venv\Scripts\python -m pytest tests/integration -q
+venv\Scripts\python -m pytest tests/integration -q   # 48 testes
 
 # Frontend
 cd frontend

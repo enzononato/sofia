@@ -25,7 +25,7 @@ messages are persisted so they appear in the inbox.
 
 import logging
 import random
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, time, timedelta, timezone
 
 from sqlalchemy import or_, select
 
@@ -37,7 +37,7 @@ from app.models.message import Message, MessageChannel, MessageDirection
 from app.models.tenant import Tenant
 from app.services import ai as ai_service
 from app.services import whatsapp as wa_service
-from app.services.ai_tools import _clinic_tz, _fmt_local
+from app.services.ai_tools import _clinic_tz, _fmt_local, _resolve_schedule
 from app.services.alerts import send_handoff_alert_email
 
 logger = logging.getLogger(__name__)
@@ -61,12 +61,76 @@ _REMINDER_TEMPLATES = [
     "{name}, olha só: seu horário na {clinic} é {when}. Consigo confirmar sua presença?",
 ]
 
+# Hour ranges (clinic-local, 24h) in which a hardcoded greeting is truthful.
+# The reminder job runs on an interval anchored to process boot, so without this
+# a "bom dia!" template could be picked at 3pm.
+_GREETING_WINDOWS = {
+    "bom dia": (5, 12),
+    "boa tarde": (12, 18),
+    "boa noite": (18, 24),
+}
 
-def _reminder_text(name: str, clinic: str, when: str) -> str:
-    """Pick a random reminder wording. Pure function (no I/O) — easy to call
-    repeatedly from a test to check the templates actually vary."""
-    template = random.choice(_REMINDER_TEMPLATES)
+# Name-free rewrites, used when the contact has no usable name (see
+# _display_name) so we never address someone by their phone number.
+_NAMELESS_OK = {
+    _REMINDER_TEMPLATES[0]: "Olá! 😊 Passando para lembrar do seu agendamento na {clinic}: {when}. Posso confirmar a sua presença?",
+    _REMINDER_TEMPLATES[1]: "Oi! Tudo bem? Só um lembrete rapidinho do seu horário na {clinic}, marcado para {when}. Posso contar com você? 💛",
+    _REMINDER_TEMPLATES[3]: "Oi! Passando aqui pra lembrar do seu compromisso na {clinic}, em {when}. Tudo certo pra esse horário?",
+    _REMINDER_TEMPLATES[4]: "Oi 🙂 Seu atendimento na {clinic} está agendado para {when}. Posso deixar confirmado?",
+}
+
+
+def _display_name(contact: Contact) -> str:
+    """
+    A name safe to put in a message. `Contact.full_name` is seeded from the
+    WhatsApp push name and falls back to the raw PHONE NUMBER when the provider
+    doesn't expose one (see webhooks._find_or_create_contact) — so greeting the
+    contact by `full_name` blindly produced literal "Olá, 5511987654321!".
+    Returns "" when there's no human-looking name; callers must degrade to a
+    greeting without a name.
+    """
+    name = (contact.full_name or "").strip()
+    if not name:
+        return ""
+    digits = "".join(ch for ch in name if ch.isdigit())
+    # All digits (with the usual phone punctuation) => it's a phone, not a name.
+    if digits and len(digits) >= 8 and not any(ch.isalpha() for ch in name):
+        return ""
+    if contact.phone and name.strip() == contact.phone.strip():
+        return ""
+    return name.split()[0]  # first name only — warmer and safer than a full string
+
+
+def _reminder_text(name: str, clinic: str, when: str, local_now: datetime | None = None) -> str:
+    """
+    Pick a random reminder wording. Pure function (no I/O) — easy to call
+    repeatedly from a test to check the templates actually vary.
+
+    `name` may be empty (see _display_name): templates then drop the name instead
+    of addressing a phone number. `local_now`, when given, filters out templates
+    whose greeting would contradict the clock ("bom dia!" sent at 15h) — the
+    reminder job fires at any hour, so a fixed greeting is a giveaway.
+    """
+    candidates = _REMINDER_TEMPLATES
+    if local_now is not None:
+        allowed = [t for t in candidates if _greeting_fits(t, local_now.hour)]
+        if allowed:
+            candidates = allowed
+    if not name:
+        nameless = [t for t in candidates if _NAMELESS_OK.get(t)]
+        if nameless:
+            template = random.choice(nameless)
+            return _NAMELESS_OK[template].format(clinic=clinic, when=when)
+    template = random.choice(candidates)
     return template.format(name=name, clinic=clinic, when=when)
+
+
+def _greeting_fits(template: str, hour: int) -> bool:
+    """False when a template hardcodes a greeting that clashes with the hour."""
+    for greeting, (start, end) in _GREETING_WINDOWS.items():
+        if greeting in template.lower():
+            return start <= hour < end
+    return True
 
 
 def _tenant_instance(tenant: Tenant) -> str | None:
@@ -94,6 +158,62 @@ def _reminder_windows(tenant: Tenant) -> list[int]:
         if valid:
             return sorted(set(valid), reverse=True)
     return sorted(_DEFAULT_REMINDER_WINDOWS, reverse=True)
+
+
+def _in_human_takeover(contact: Contact, now: datetime) -> bool:
+    """Staff are handling this contact by hand right now (see
+    Contact.human_takeover_until / webhooks._process_human_outbound_message)."""
+    until = getattr(contact, "human_takeover_until", None)
+    return until is not None and until > now
+
+
+def can_send_proactive(tenant: Tenant, contact: Contact, now: datetime) -> bool:
+    """
+    Whether the clinic may send this contact an UNPROMPTED message right now
+    (reminder / re-engagement). Pure — no I/O — so it's directly testable.
+
+    Blocks on:
+      - `contact.ai_paused` — Sofia is off for this conversation (usage cap or a
+        manual pause in the Inbox);
+      - an active `human_takeover_until` window — a human is mid-conversation
+        with this patient and an automated nudge would talk over them;
+      - the clinic's own working hours — the scheduler runs on an interval
+        anchored to process boot, so without this a deploy at 21h makes the
+        re-engagement job fire at 03h local. A "human secretary" texting at 3am
+        is the single loudest tell that she isn't one.
+
+    The window comes from `settings.schedule` (the same open/close/working_days
+    the booking tools use), optionally overridden by
+    `settings.followups.quiet_hours = {"start": "HH:MM", "end": "HH:MM"}`.
+    """
+    if getattr(contact, "ai_paused", False):
+        return False
+    if _in_human_takeover(contact, now):
+        return False
+    return _within_send_window(tenant, now)
+
+
+def _within_send_window(tenant: Tenant, now: datetime) -> bool:
+    """True when `now` falls inside the clinic's allowed outreach window."""
+    tenant_settings = tenant.settings or {}
+    tz = _clinic_tz(tenant_settings)
+    local = now.astimezone(tz)
+
+    fcfg = _followups_cfg(tenant)
+    window = fcfg.get("send_window") or {}
+    sched = _resolve_schedule(tenant_settings, local.date())
+
+    # Explicit per-clinic override wins; otherwise fall back to opening hours.
+    try:
+        start_t = time.fromisoformat(window["start"]) if window.get("start") else sched["open_t"]
+        end_t = time.fromisoformat(window["end"]) if window.get("end") else sched["close_t"]
+    except (ValueError, TypeError):
+        start_t, end_t = sched["open_t"], sched["close_t"]
+
+    # isoweekday(): Mon=1..Sun=7 — same convention as schedule.working_days.
+    if not window.get("start") and local.isoweekday() not in sched["working_days"]:
+        return False
+    return start_t <= local.time() < end_t
 
 
 async def _save_outbound(db, tenant_id, contact_id, text: str) -> None:
@@ -143,9 +263,18 @@ async def run_appointment_reminders() -> None:
                     contact = await db.get(Contact, appt.contact_id)
                     if not contact or not contact.phone:
                         break
+                    # Don't text a paused contact, don't talk over a human who is
+                    # mid-conversation, and don't send outside the clinic's hours.
+                    # NOTE: the window is deliberately NOT marked as sent here, so
+                    # a reminder skipped at 3am is picked up by the next run once
+                    # the clinic opens (as long as the window hasn't elapsed).
+                    if not can_send_proactive(tenant, contact, now):
+                        break
                     tz = _clinic_tz(tenant.settings or {})
                     when = _fmt_local(appt.scheduled_at, tz)
-                    text = _reminder_text(contact.full_name, tenant.name, when)
+                    text = _reminder_text(
+                        _display_name(contact), tenant.name, when, now.astimezone(tz)
+                    )
                     try:
                         await wa_service.send_text_message(instance_token=instance, phone=contact.phone, text=text)
                     except Exception:
@@ -184,6 +313,13 @@ async def run_reengagement() -> None:
             if not instance or fcfg.get("reengagement_enabled", True) is False:
                 continue
 
+            # Outside the clinic's hours nothing goes out for this tenant — the
+            # job's interval is anchored to process boot, so it lands at 03h local
+            # often enough to matter. Skipping is safe: these contacts have been
+            # silent for days, one more cycle changes nothing.
+            if not _within_send_window(tenant, now):
+                continue
+
             # Per-clinic timing (falls back to global defaults).
             after_days = max(1, _int_cfg(fcfg, "reengage_after_days", settings.REENGAGE_AFTER_DAYS))
             cooldown_days = max(1, _int_cfg(fcfg, "reengage_cooldown_days", settings.REENGAGE_COOLDOWN_DAYS))
@@ -210,6 +346,12 @@ async def run_reengagement() -> None:
 
             for contact in contacts:
                 if not contact.phone:
+                    continue
+                # The query already filters ai_paused, but human_takeover_until is
+                # a moving window (60 min, renewed by staff replying from their own
+                # phone) — check it per contact so a nudge never talks over a human
+                # who is answering this patient right now.
+                if _in_human_takeover(contact, now):
                     continue
                 # 3.3 — ground the message in the real conversation: fetch the
                 # last ~10 text-bearing messages (oldest → newest) so Sofia can
@@ -251,11 +393,12 @@ async def run_reengagement() -> None:
 
 async def run_paused_alert() -> None:
     """
-    Second-layer alert (item 3.2): catches contacts who were handed off to a
-    human (`ai_paused=True`, set by app/services/ai_tools.py::_request_human_handoff)
-    and then... nobody answered. If the contact's most recent message is still
-    an unanswered INBOUND one and it's older than the stale threshold, email
-    the clinic (see app/services/alerts.py::send_handoff_alert_email).
+    Second-layer alert (item 3.2): catches contacts left paused
+    (`ai_paused=True` — set by the AI-usage cap in webhooks.py or manually by
+    staff in the Inbox; Sofia herself no longer hands off) whom then... nobody
+    answered. If the contact's most recent message is still an unanswered
+    INBOUND one and it's older than the stale threshold, email the clinic
+    (see app/services/alerts.py::send_handoff_alert_email).
 
     Runs as its own scheduler job (app/services/scheduler.py), separate from
     run_appointment_reminders/run_reengagement — different trigger condition,

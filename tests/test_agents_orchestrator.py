@@ -75,14 +75,6 @@ class TestPureCompositionHelpers:
     def test_coordination_note_absent_when_previous_text_empty(self):
         assert orchestrator.coordination_note_for("") is None
 
-    def test_escalation_note_present_when_reason_given(self):
-        note = orchestrator.escalation_note_for("paciente irritado")
-        assert note is not None
-        assert "paciente irritado" in note
-
-    def test_escalation_note_absent_when_no_reason(self):
-        assert orchestrator.escalation_note_for(None) is None
-
     def test_compose_system_prompt_includes_all_sections(self):
         prompt = orchestrator.compose_system_prompt(
             "OVERLAY_TEXT", "IDENTITY_TEXT", "STAGE_TEXT", "CONTEXT_TEXT", "NOTE_TEXT"
@@ -115,24 +107,7 @@ class TestGenerateReplyModes:
         assert text == "Fazemos limpeza de pele por R$180."
         assert len(client.models.calls) == 2
 
-    async def test_handoff_direct_mode_single_hop(self, monkeypatch):
-        client = SequencedFakeClient([
-            fake_function_call("classify", {"agents": ["handoff"], "handoff_reason": "quer atendente"}),  # router
-            fake_function_call("request_human_handoff", {"reason": "quer atendente"}),  # handoff calls its tool
-            fake_text("Vou te passar pra alguém da equipe, já já continuam por aqui 😊"),  # handoff's goodbye
-        ])
-        _patched_client(monkeypatch, client)
-
-        with patch("app.services.agents.base.execute_tool", new=AsyncMock(return_value={"success": True, "message": "ok"})):
-            text, model = await orchestrator.generate_reply(
-                tenant=_tenant(), contact=_contact(), new_message="quero falar com atendente",
-                history=[], db=_FakeDB(),
-            )
-        assert "equipe" in text
-        # router + 2 handoff-loop iterations (tool call, then final text) = 3 calls
-        assert len(client.models.calls) == 3
-
-    async def test_composite_mode_joins_both_specialists_and_forbids_further_escalation(self, monkeypatch):
+    async def test_composite_mode_joins_both_specialists(self, monkeypatch):
         client = SequencedFakeClient([
             fake_function_call("classify", {"agents": ["sales", "booking"]}),  # router
             fake_text("A limpeza de pele custa R$180."),  # sales
@@ -148,28 +123,21 @@ class TestGenerateReplyModes:
         assert text == "A limpeza de pele custa R$180.[[BREAK]]Tenho quinta às 10h ou sexta às 15h."
         assert len(client.models.calls) == 3  # router + 2 specialists, no 3rd hop possible
 
-    async def test_escalation_mode_discards_specialist_text_replaces_with_handoff(self, monkeypatch):
+    async def test_upset_patient_is_handled_by_sales_not_handed_off(self, monkeypatch):
+        # A patient asking for a human / complaining routes to Sales, which
+        # resolves the turn itself — there is no handoff path to escalate to.
         client = SequencedFakeClient([
             fake_function_call("classify", {"agents": ["sales"]}),  # router
-            fake_function_call(  # sales hits a wall and escalates
-                "escalate_to_human", {"reason": "pediu desconto fora do que os dados permitem"}
-            ),
-            fake_function_call("request_human_handoff", {"reason": "pediu desconto fora do permitido"}),  # handoff tool
-            fake_text("Vou te passar pra alguém da equipe 😊"),  # handoff's goodbye
+            fake_text("Poxa, sinto muito que ficou assim! Me conta o que aconteceu que eu resolvo com você 💛"),
         ])
         _patched_client(monkeypatch, client)
 
-        with patch("app.services.agents.base.execute_tool", new=AsyncMock(return_value={"success": True, "message": "ok"})):
-            text, model = await orchestrator.generate_reply(
-                tenant=_tenant(), contact=_contact(), new_message="me dá 50% de desconto",
-                history=[], db=_FakeDB(),
-            )
-        # Only Handoff's goodbye is sent — Sales never produced patient-facing
-        # text in this scenario (it went straight to escalate_to_human), and
-        # even if it had, that text must never appear in the final reply.
-        assert text == "Vou te passar pra alguém da equipe 😊"
-        assert "desconto" not in text  # nothing from Sales' domain leaks into the final reply
-        assert len(client.models.calls) == 4  # router + sales(escalate) + handoff(tool) + handoff(text)
+        text, model = await orchestrator.generate_reply(
+            tenant=_tenant(), contact=_contact(), new_message="quero falar com uma pessoa de verdade, isso é péssimo",
+            history=[], db=_FakeDB(),
+        )
+        assert "resolvo com você" in text
+        assert len(client.models.calls) == 2  # router + sales, no escalation hop
 
 
 class TestSalesCannotBookEvenIfItTries:

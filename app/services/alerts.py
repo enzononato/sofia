@@ -4,16 +4,17 @@ same tolerant pattern as staff invites: if RESEND_API_KEY isn't configured the
 send is skipped (logged, not raised) so nothing here can ever break the AI
 reply flow or a scheduler job.
 
-Today this covers the human-handoff alert (item 3.1 / 3.2 of the robustness
-plan): when Sofia hands a conversation off to a human (`request_human_handoff`
-in app/services/ai_tools.py, which sets `contact.ai_paused = True`), the
-clinic should be notified by email instead of relying on someone noticing the
-passive badge in the Inbox. A second alert fires if the contact stays paused
-with an unanswered inbound message for too long (see
-app/services/followups.py::run_paused_alert).
-
-NOT wired into the AI tool-call flow yet — see the docstring on
-`send_handoff_alert_email` for exactly where to call it from.
+Sofia herself never hands a conversation off to a human (that path was
+removed — she resolves every turn on her own). So `contact.ai_paused` is now
+set only by the AI-usage caps (a cost safety valve — see
+webhooks.py::_ai_usage_caps_allow_reply) or manually by staff in the Inbox.
+This module notifies the clinic by email when a contact ends up paused:
+  - `send_handoff_alert_email` — fired by the per-contact usage cap the moment
+    it trips (webhooks.py), so staff know a conversation went quiet.
+  - the same function, in its "forgotten" flavor, is fired by
+    app/services/followups.py::run_paused_alert when any paused contact has an
+    unanswered inbound message sitting too long.
+  - `send_tenant_usage_cap_alert_email` — the tenant-wide cap equivalent.
 """
 
 import logging
@@ -88,10 +89,11 @@ async def send_handoff_alert_email(
     Notify the clinic (tenant.email) that a patient needs human attention.
 
     Two flavors, selected by `stale_minutes`:
-      - stale_minutes=None (default): "fresh" handoff — Sofia just paused
-        herself on this contact. `reason` is the free-text `reason` argument
-        the AI passed to `request_human_handoff` (may be None/empty).
-      - stale_minutes=<int>: "forgotten" handoff — the contact has been
+      - stale_minutes=None (default): "fresh" pause — the contact was just
+        paused (today, only the per-contact AI-usage cap does this; see
+        webhooks.py::_ai_usage_caps_allow_reply). `reason` is a short
+        free-text explanation (may be None/empty).
+      - stale_minutes=<int>: "forgotten" pause — the contact has been
         paused with an unanswered inbound message for at least that many
         minutes (see followups.py::run_paused_alert). `reason` is ignored
         in this flavor (the stale-duration template speaks for itself).
@@ -104,34 +106,11 @@ async def send_handoff_alert_email(
     Returns True if an email was actually dispatched, False if skipped
     (disabled by tenant, or no email provider configured) or failed.
 
-    ------------------------------------------------------------------
-    WIRING NOTE (not done in this change — see plan constraints): this
-    function is not yet called anywhere. The other workstream owns
-    app/services/ai_tools.py and app/api/v1/routes/webhooks.py; connect it
-    there during the merge step:
-
-    Option A (preferred) — app/services/ai.py::generate_reply, right after
-      the tool-execution block that already exists around the line:
-          tool_result = await execute_tool(
-              name=fn.name, args=dict(fn.args), db=db,
-              tenant_id=..., contact_id=..., ...
-          )
-      (currently ~line 686-698 in app/services/ai.py — check with
-      `grep -n "tool_result = await execute_tool" app/services/ai.py`
-      since exact line numbers drift as ai.py is edited by the other
-      workstream). Add immediately
-      after that call, before the `logger.info("ai_tool_executed", ...)`
-      block:
-          if fn.name == "request_human_handoff" and tool_result.get("success"):
-              import asyncio
-              from app.services.alerts import send_handoff_alert_email
-              asyncio.create_task(
-                  send_handoff_alert_email(tenant, contact, dict(fn.args).get("reason"))
-              )
-      Use `asyncio.create_task` (fire-and-forget), NOT `await` — email has a
-      15s HTTP timeout and must never add latency to Sofia's reply. `tenant`
-      and `contact` are already in scope in `generate_reply`; `dict(fn.args)`
-      gives the `reason` the AI passed to the tool.
+    Always dispatched fire-and-forget (`asyncio.create_task`), never awaited —
+    email has a 15s HTTP timeout and must not add latency to Sofia's reply or
+    a scheduler job. Current call sites: the per-contact usage cap in
+    webhooks.py::_ai_usage_caps_allow_reply (fresh flavor) and
+    followups.py::run_paused_alert (forgotten flavor).
 
     Option B — app/api/v1/routes/webhooks.py::_generate_and_send, if Option A
       turns out awkward (e.g. because ai.py is under heavy concurrent edit).

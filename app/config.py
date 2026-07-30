@@ -120,6 +120,7 @@ class Settings(BaseSettings):
     REENGAGE_COOLDOWN_DAYS: int = 7                   # min gap between nudges to the same contact
     HANDOFF_ALERT_JOB_MINUTES: int = 10               # how often the "still paused" alert job runs
     HANDOFF_ALERT_STALE_MINUTES: int = 30             # unanswered-inbound age that triggers the alert
+    RECOVERY_SWEEP_JOB_MINUTES: int = 5               # how often unanswered inbounds are re-swept
 
     # ── Google Calendar (per-professional OAuth) ─────────────────────────────
     GOOGLE_CLIENT_ID: Optional[str] = None

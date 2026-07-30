@@ -50,6 +50,9 @@ export interface TenantAIConfig {
   temperature?: number;
   max_output_tokens?: number;
   multimodal_enabled?: boolean;
+  // Opt-in per clinic: routes each turn to a Booking/Sales specialist instead of
+  // the single-agent path. Costs 2-3 Gemini calls per message; default off.
+  multi_agent_enabled?: boolean;
   // "capacity": clinic-wide slots (N simultaneous). "per_professional": each
   // booking is assigned to a professional, respecting their services + hours.
   scheduling_mode?: "capacity" | "per_professional";
