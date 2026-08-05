@@ -86,13 +86,14 @@ Legenda: 🔴 bloqueador · 🟡 recomendado · ⏳ só você pode fazer (painel
     política e da base legal — não reduz. Reavaliar com apoio jurídico antes do lançamento
     público amplo.
 
-- [ ] ⏳ **Configurar Google Calendar OAuth no Google Cloud Console**
-  - Criar projeto, habilitar Google Calendar API, tela de consentimento OAuth.
-  - Criar credenciais (Client ID + Secret) com os redirect URIs corretos.
-  - `GOOGLE_CLIENT_ID` / `GOOGLE_CLIENT_SECRET` / `GOOGLE_REDIRECT_URI` no `.env` e EasyPanel.
-  - Para uso público sem aviso de "app não verificado": submeter para verificação do Google.
-  - Enquanto isso não existe, o job `gcal_reconcile` nem sequer é registrado
-    (`app/services/scheduler.py:52`) e todo o módulo é no-op.
+- [ ] ⏳ **Google Calendar: submeter o app para verificação do Google**
+  - ✅ As credenciais **já estão configuradas em produção**: os logs do EasyPanel mostram
+    `⏰ agendador iniciado ... gcal=True` e o job `run_google_sync_reconcile` executando a cada
+    15 min com sucesso. `GOOGLE_CLIENT_ID`/`SECRET`/`REDIRECT_URI` estão no ambiente.
+  - Falta apenas: para uso público sem a tela de aviso "app não verificado", submeter o app
+    para verificação do Google (processo do Google Cloud Console, leva dias).
+  - Continua valendo o item da seção "Recomendado": a sincronização é só de ida (o
+    `check_availability` não consulta o free/busy do profissional).
 
 ---
 
