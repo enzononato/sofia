@@ -40,9 +40,20 @@ export interface Contact {
   whatsapp_name?: string | null;
   profile_picture_url?: string | null;
   ai_paused: boolean;
+  // Set when someone on the team replied to this patient straight from their
+  // own phone / WhatsApp Web: Sofia stays quiet until it lapses (60 min,
+  // renewed on each hand-typed message). Distinct from `ai_paused`, which only
+  // staff clear. Read-only — the API never accepts it on a PATCH.
+  human_takeover_until?: string | null;
   phone: string;
   status: string;
   last_message?: MessagePreview;
+}
+
+/** True while a staff member is handling this conversation by hand. */
+export function isInHumanTakeover(contact: Pick<Contact, "human_takeover_until">): boolean {
+  if (!contact.human_takeover_until) return false;
+  return new Date(contact.human_takeover_until).getTime() > Date.now();
 }
 
 export function useContacts() {

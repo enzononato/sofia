@@ -1,13 +1,13 @@
 "use client";
 
 import { useEffect, useRef, useState, useCallback } from "react";
-import { Contact, Message, useMessages, useSendMessage, useSendMedia, useUpdateContact, useSuggestReply } from "@/hooks/useInbox";
+import { Contact, Message, useMessages, useSendMessage, useSendMedia, useUpdateContact, useSuggestReply, isInHumanTakeover } from "@/hooks/useInbox";
 import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar";
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent } from "@/components/ui/dialog";
 import {
   Bot, Phone, Send, User, PauseCircle, PlayCircle, Loader2,
-  Mic, Square, Paperclip, Image as ImageIcon, FileText, X, Download, Sparkles,
+  Mic, Square, Paperclip, Image as ImageIcon, FileText, X, Download, Sparkles, UserCheck,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { format, isToday, isYesterday } from "date-fns";
@@ -309,6 +309,13 @@ export function ChatWindow({ contact }: ChatWindowProps) {
   // Messages arrive from backend most recent first — reverse for UI
   const displayMessages = messages ? [...messages].reverse() : [];
 
+  // Staff replied by hand from their own phone: Sofia is deliberately quiet
+  // until this lapses (see Contact.human_takeover_until).
+  const inHumanTakeover = isInHumanTakeover(contact);
+  const takeoverUntilLabel = contact.human_takeover_until
+    ? format(new Date(contact.human_takeover_until), "HH:mm")
+    : "";
+
   return (
     <div className="flex flex-col h-full min-h-0 overflow-hidden bg-background/10">
       {/* ── Header ── */}
@@ -338,10 +345,17 @@ export function ChatWindow({ contact }: ChatWindowProps) {
           <button
             onClick={handleToggleAI}
             disabled={isUpdatingStatus}
+            title={
+              inHumanTakeover && !contact.ai_paused
+                ? `Alguém da equipe respondeu este paciente pelo celular, então a Sofia está esperando até ${takeoverUntilLabel}. Ela volta sozinha.`
+                : undefined
+            }
             className={cn(
               "flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-xs font-semibold transition-all cursor-pointer",
               contact.ai_paused
                 ? "bg-amber-500/10 text-amber-500 border border-amber-500/20 hover:bg-amber-500/20"
+                : inHumanTakeover
+                ? "bg-sky-500/10 text-sky-400 border border-sky-500/20 hover:bg-sky-500/20"
                 : "bg-emerald-500/10 text-emerald-500 border border-emerald-500/20 hover:bg-emerald-500/20",
               isUpdatingStatus && "opacity-50 cursor-not-allowed"
             )}
@@ -350,12 +364,29 @@ export function ChatWindow({ contact }: ChatWindowProps) {
               <Loader2 className="h-3 w-3 animate-spin" />
             ) : contact.ai_paused ? (
               <><PauseCircle className="h-3.5 w-3.5" /> Pausada</>
+            ) : inHumanTakeover ? (
+              <><UserCheck className="h-3.5 w-3.5" /> Aguardando até {takeoverUntilLabel}</>
             ) : (
               <><PlayCircle className="h-3.5 w-3.5" /> Ativa</>
             )}
           </button>
         </div>
       </div>
+
+      {/* Human-takeover banner. Without this the header read "Ativa" while Sofia
+          was deliberately silent, and nobody could tell why the patient wasn't
+          being answered. */}
+      {inHumanTakeover && !contact.ai_paused && (
+        <div className="flex-shrink-0 flex items-start gap-2.5 px-4 py-2.5 bg-sky-500/5 border-b border-sky-500/15">
+          <UserCheck className="h-4 w-4 text-sky-400 shrink-0 mt-0.5" />
+          <p className="text-xs text-sky-100/80 font-sans leading-relaxed">
+            Alguém da equipe respondeu este paciente direto pelo celular, então a{" "}
+            <strong className="font-semibold">Sofia está em silêncio até {takeoverUntilLabel}</strong>{" "}
+            para não falar por cima. Ela volta a responder sozinha depois disso; cada nova mensagem
+            enviada à mão reinicia essa espera.
+          </p>
+        </div>
+      )}
 
       {/* ── Messages ── */}
       <div ref={scrollContainerRef} className="flex-1 min-h-0 overflow-y-auto p-4 flex flex-col space-y-4">

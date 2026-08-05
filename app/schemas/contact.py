@@ -50,6 +50,16 @@ class ContactRead(ContactBase):
     crm_stage_source: str | None = None
     crm_stage_updated_at: datetime | None = None
     last_inbound_at: datetime | None = None
+    # Self-expiring pause set when a staff member replies to this contact
+    # straight from their own phone / WhatsApp Web (see
+    # webhooks.py::_process_human_outbound_message). Read-only for clients: it
+    # is never in ContactUpdate, so a PATCH can't forge or clear it — staff
+    # clear it by simply not replying by hand until it lapses.
+    #
+    # Exposed because without it the Inbox showed "Secretária IA: Ativa" while
+    # Sofia was deliberately silent, and nobody could tell why the patient
+    # wasn't getting answers.
+    human_takeover_until: datetime | None = None
     created_at: datetime
     updated_at: datetime
 
