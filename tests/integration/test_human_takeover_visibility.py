@@ -91,23 +91,62 @@ async def test_patch_cannot_forge_a_takeover_window(
     assert contact.human_takeover_until is None
 
 
-async def test_patch_cannot_clear_an_active_takeover_window(
+async def test_reactivating_sofia_clears_the_takeover_window(
     client, db_sessionmaker, tenant_a: SeededTenant, auth_headers_a
 ):
+    """The Inbox toggle is one switch to staff: turning Sofia back ON must make
+    her answer NOW, not in up to 60 minutes."""
     from app.models.contact import Contact
 
     until = datetime.now(timezone.utc) + timedelta(minutes=45)
     contact_id = await _seed_contact(db_sessionmaker, tenant_a.tenant_id, takeover_until=until)
 
     resp = await client.patch(
-        f"/contacts/{contact_id}",
-        headers=auth_headers_a,
-        json={"human_takeover_until": None},
+        f"/contacts/{contact_id}", headers=auth_headers_a, json={"ai_paused": False}
+    )
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["human_takeover_until"] is None
+    assert resp.json()["ai_paused"] is False
+
+    async with db_sessionmaker() as session:
+        contact = await session.scalar(select(Contact).where(Contact.id == contact_id))
+    assert contact.human_takeover_until is None
+    assert contact.ai_paused is False
+
+
+async def test_pausing_sofia_does_not_touch_the_takeover_window(
+    client, db_sessionmaker, tenant_a: SeededTenant, auth_headers_a
+):
+    """Only the reactivation path clears it — pausing is a different intent."""
+    from app.models.contact import Contact
+
+    until = datetime.now(timezone.utc) + timedelta(minutes=45)
+    contact_id = await _seed_contact(db_sessionmaker, tenant_a.tenant_id, takeover_until=until)
+
+    resp = await client.patch(
+        f"/contacts/{contact_id}", headers=auth_headers_a, json={"ai_paused": True}
     )
     assert resp.status_code == 200, resp.text
 
     async with db_sessionmaker() as session:
         contact = await session.scalar(select(Contact).where(Contact.id == contact_id))
-    assert contact.human_takeover_until is not None, (
-        "the window is server-owned and self-expiring; the panel must not clear it"
+    assert contact.human_takeover_until is not None
+
+
+async def test_unrelated_patch_does_not_clear_the_takeover_window(
+    client, db_sessionmaker, tenant_a: SeededTenant, auth_headers_a
+):
+    """Renaming a contact must not silently wake Sofia up mid-takeover."""
+    from app.models.contact import Contact
+
+    until = datetime.now(timezone.utc) + timedelta(minutes=45)
+    contact_id = await _seed_contact(db_sessionmaker, tenant_a.tenant_id, takeover_until=until)
+
+    resp = await client.patch(
+        f"/contacts/{contact_id}", headers=auth_headers_a, json={"full_name": "Outro Nome"}
     )
+    assert resp.status_code == 200, resp.text
+
+    async with db_sessionmaker() as session:
+        contact = await session.scalar(select(Contact).where(Contact.id == contact_id))
+    assert contact.human_takeover_until is not None

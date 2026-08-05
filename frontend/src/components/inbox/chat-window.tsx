@@ -184,8 +184,13 @@ export function ChatWindow({ contact }: ChatWindowProps) {
     );
   };
 
+  // One switch from the user's point of view: turning Sofia back ON must make
+  // her answer NOW. Sending ai_paused=false also clears any human-takeover
+  // window server-side, otherwise she'd stay silent for up to an hour right
+  // after someone explicitly reactivated her.
   const handleToggleAI = () => {
-    updateContact({ id: contact.id, data: { ai_paused: !contact.ai_paused } });
+    const shouldPause = !contact.ai_paused && !isInHumanTakeover(contact);
+    updateContact({ id: contact.id, data: { ai_paused: shouldPause } });
   };
 
   // Staff copilot: ask Sofia to draft a reply and drop it into the input for
@@ -347,8 +352,10 @@ export function ChatWindow({ contact }: ChatWindowProps) {
             disabled={isUpdatingStatus}
             title={
               inHumanTakeover && !contact.ai_paused
-                ? `Alguém da equipe respondeu este paciente pelo celular, então a Sofia está esperando até ${takeoverUntilLabel}. Ela volta sozinha.`
-                : undefined
+                ? `Alguém da equipe respondeu pelo celular, então a Sofia espera até ${takeoverUntilLabel}. Clique para reativá-la agora.`
+                : contact.ai_paused
+                ? "Clique para a Sofia voltar a responder este paciente"
+                : "Clique para pausar a Sofia neste paciente"
             }
             className={cn(
               "flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-xs font-semibold transition-all cursor-pointer",
@@ -379,12 +386,31 @@ export function ChatWindow({ contact }: ChatWindowProps) {
       {inHumanTakeover && !contact.ai_paused && (
         <div className="flex-shrink-0 flex items-start gap-2.5 px-4 py-2.5 bg-sky-500/5 border-b border-sky-500/15">
           <UserCheck className="h-4 w-4 text-sky-400 shrink-0 mt-0.5" />
-          <p className="text-xs text-sky-100/80 font-sans leading-relaxed">
-            Alguém da equipe respondeu este paciente direto pelo celular, então a{" "}
-            <strong className="font-semibold">Sofia está em silêncio até {takeoverUntilLabel}</strong>{" "}
-            para não falar por cima. Ela volta a responder sozinha depois disso; cada nova mensagem
-            enviada à mão reinicia essa espera.
-          </p>
+          <div className="flex-1 flex flex-col sm:flex-row sm:items-center gap-2">
+            <p className="text-xs text-sky-100/80 font-sans leading-relaxed flex-1">
+              Alguém da equipe respondeu este paciente direto pelo celular, então a{" "}
+              <strong className="font-semibold">Sofia está em silêncio até {takeoverUntilLabel}</strong>{" "}
+              para não falar por cima. Ela volta sozinha depois disso; cada nova mensagem enviada à
+              mão reinicia essa espera.
+            </p>
+            <button
+              type="button"
+              onClick={handleToggleAI}
+              disabled={isUpdatingStatus}
+              className={cn(
+                "shrink-0 inline-flex items-center gap-1.5 rounded-lg border border-sky-400/30 bg-sky-500/10 px-3 py-1.5",
+                "text-[11px] font-semibold text-sky-200 transition-all hover:bg-sky-500/20 active:scale-95 cursor-pointer",
+                isUpdatingStatus && "opacity-50 cursor-not-allowed"
+              )}
+            >
+              {isUpdatingStatus ? (
+                <Loader2 className="h-3.5 w-3.5 animate-spin" />
+              ) : (
+                <PlayCircle className="h-3.5 w-3.5" />
+              )}
+              Reativar Sofia agora
+            </button>
+          </div>
         </div>
       )}
 

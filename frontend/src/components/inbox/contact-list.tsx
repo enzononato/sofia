@@ -1,7 +1,7 @@
 "use client";
 
 import { useState } from "react";
-import { Contact } from "@/hooks/useInbox";
+import { Contact, isInHumanTakeover } from "@/hooks/useInbox";
 import { Search, User } from "lucide-react";
 import { Input } from "@/components/ui/input";
 import { ScrollArea } from "@/components/ui/scroll-area";
@@ -167,9 +167,17 @@ export function ContactList({ contacts, isLoading, selectedId, onSelect }: Conta
                       <p className="text-xs text-muted-foreground truncate flex-1 opacity-80 font-sans">
                         {contact.last_message ? messagePreview(contact.last_message) : "Nenhuma mensagem ainda."}
                       </p>
-                      {contact.ai_paused && (
-                        <span className="w-2 h-2 rounded-full bg-amber-500 flex-shrink-0 animate-pulse" title="Aguardando Humano" />
-                      )}
+                      {contact.ai_paused ? (
+                        <span
+                          className="w-2 h-2 rounded-full bg-amber-500 flex-shrink-0 animate-pulse"
+                          title="Sofia pausada — aguardando alguém da equipe responder"
+                        />
+                      ) : isInHumanTakeover(contact) ? (
+                        <span
+                          className="w-2 h-2 rounded-full bg-sky-400 flex-shrink-0"
+                          title="Alguém da equipe está respondendo pelo celular — a Sofia volta sozinha em instantes"
+                        />
+                      ) : null}
                     </div>
                   </div>
                 </button>

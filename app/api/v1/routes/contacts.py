@@ -291,6 +291,15 @@ async def update_contact(
         contact.crm_stage_source = "manual"
         contact.crm_stage_updated_at = datetime.now(timezone.utc)
 
+    # Explicitly reactivating Sofia clears BOTH pauses. Staff think of it as one
+    # switch ("a Sofia volta a responder este paciente"), and leaving the
+    # human-takeover window running would keep her silent for up to
+    # HUMAN_TAKEOVER_PAUSE_MINUTES after they just asked for the opposite.
+    # Note this only ever CLEARS the window: `human_takeover_until` is absent
+    # from ContactUpdate, so a client can never set or extend one.
+    if update_data.get("ai_paused") is False:
+        contact.human_takeover_until = None
+
     for field, value in update_data.items():
         setattr(contact, field, value)
 
