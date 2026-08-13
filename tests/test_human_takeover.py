@@ -6,8 +6,8 @@ Sofia auto-pauses herself for that contact for HUMAN_TAKEOVER_PAUSE_MINUTES,
 renewing (not stacking) on every new human message, and expiring on its own.
 
 Covers, without a real DB session (fake AsyncSessionLocal/session doubles):
-  - `_in_human_takeover()`: the pure predicate gating every AI-reply decision
-    point (future timestamp = paused, past/None = not paused);
+  - `app.services.takeover.in_human_takeover()`: the pure predicate gating every
+    AI-reply decision point (future timestamp = paused, past/None = not paused);
   - `_process_human_outbound_message` sets `contact.human_takeover_until` to
     ~now + HUMAN_TAKEOVER_PAUSE_MINUTES, and a SECOND human message RESETS it
     (proven by pre-seeding an absurd far-future value that would survive an
@@ -26,31 +26,35 @@ from types import SimpleNamespace
 import pytest
 
 from app.api.v1.routes import webhooks as webhooks_module
+from app.services.takeover import in_human_takeover
 
 
 # ---------------------------------------------------------------------------
-# _in_human_takeover — pure predicate
+# in_human_takeover — predicado puro (agora em app/services/takeover.py)
 # ---------------------------------------------------------------------------
 
 def test_in_human_takeover_true_when_timestamp_is_in_the_future():
-    future = datetime.now(timezone.utc) + timedelta(minutes=30)
-    contact = SimpleNamespace(human_takeover_until=future)
-    assert webhooks_module._in_human_takeover(contact) is True
+    contact = SimpleNamespace(
+        human_takeover_until=datetime.now(timezone.utc) + timedelta(minutes=30)
+    )
+    assert in_human_takeover(contact, datetime.now(timezone.utc)) is True
 
 
 def test_in_human_takeover_false_when_timestamp_is_in_the_past():
-    past = datetime.now(timezone.utc) - timedelta(minutes=1)
-    contact = SimpleNamespace(human_takeover_until=past)
-    assert webhooks_module._in_human_takeover(contact) is False
+    contact = SimpleNamespace(
+        human_takeover_until=datetime.now(timezone.utc) - timedelta(minutes=1)
+    )
+    assert in_human_takeover(contact, datetime.now(timezone.utc)) is False
 
 
 def test_in_human_takeover_false_when_none():
-    assert webhooks_module._in_human_takeover(SimpleNamespace(human_takeover_until=None)) is False
+    assert in_human_takeover(
+        SimpleNamespace(human_takeover_until=None), datetime.now(timezone.utc)
+    ) is False
 
 
 def test_in_human_takeover_false_when_attribute_missing():
-    # Defensive: a bare object with no such attribute must not raise.
-    assert webhooks_module._in_human_takeover(SimpleNamespace()) is False
+    assert in_human_takeover(SimpleNamespace(), datetime.now(timezone.utc)) is False
 
 
 # ---------------------------------------------------------------------------

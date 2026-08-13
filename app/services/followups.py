@@ -39,6 +39,7 @@ from app.services import ai as ai_service
 from app.services import whatsapp as wa_service
 from app.services.ai_tools import _clinic_tz, _fmt_local, _resolve_schedule
 from app.services.alerts import send_handoff_alert_email
+from app.services.takeover import in_human_takeover
 
 logger = logging.getLogger(__name__)
 
@@ -160,13 +161,6 @@ def _reminder_windows(tenant: Tenant) -> list[int]:
     return sorted(_DEFAULT_REMINDER_WINDOWS, reverse=True)
 
 
-def _in_human_takeover(contact: Contact, now: datetime) -> bool:
-    """Staff are handling this contact by hand right now (see
-    Contact.human_takeover_until / webhooks._process_human_outbound_message)."""
-    until = getattr(contact, "human_takeover_until", None)
-    return until is not None and until > now
-
-
 def can_send_proactive(tenant: Tenant, contact: Contact, now: datetime) -> bool:
     """
     Whether the clinic may send this contact an UNPROMPTED message right now
@@ -188,7 +182,7 @@ def can_send_proactive(tenant: Tenant, contact: Contact, now: datetime) -> bool:
     """
     if getattr(contact, "ai_paused", False):
         return False
-    if _in_human_takeover(contact, now):
+    if in_human_takeover(contact, now):
         return False
     return _within_send_window(tenant, now)
 
@@ -351,7 +345,7 @@ async def run_reengagement() -> None:
                 # a moving window (60 min, renewed by staff replying from their own
                 # phone) — check it per contact so a nudge never talks over a human
                 # who is answering this patient right now.
-                if _in_human_takeover(contact, now):
+                if in_human_takeover(contact, now):
                     continue
                 # 3.3 — ground the message in the real conversation: fetch the
                 # last ~10 text-bearing messages (oldest → newest) so Sofia can
