@@ -124,6 +124,15 @@ async def run_specialist_loop(
 
     empty_retries = 0
     for iteration in range(max_iterations):
+        logger.debug(
+            "agent_iteration",
+            extra={
+                "iteration": iteration,
+                "model": model,
+                "tenant_id": str(tenant.id),
+                "contact_id": str(contact.id),
+            },
+        )
         response = await _generate_content_with_retry(client, model, contents, config, tenant, contact, iteration)
 
         candidate = response.candidates[0]
@@ -137,6 +146,7 @@ async def run_specialist_loop(
                 extra={
                     "finish_reason": str(finish_reason),
                     "iteration": iteration,
+                    "retry": empty_retries,
                     "model": model,
                     "tenant_id": str(tenant.id),
                     "contact_id": str(contact.id),
@@ -205,6 +215,7 @@ async def run_specialist_loop(
                 "tenant_id": str(tenant.id),
                 "contact_id": str(contact.id),
                 "iteration": iteration,
+                "result_keys": list(tool_result.keys()) if isinstance(tool_result, dict) else None,
             },
         )
 
