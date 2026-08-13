@@ -45,13 +45,23 @@ class TestInHumanTakeover:
 
 
 class TestNotInHumanTakeoverClause:
-    def test_covers_both_cases_the_python_form_accepts(self):
-        # O predicado é o complemento da função: passa quem nunca teve janela
-        # (NULL) e quem já venceu (<= now).
-        compiled = str(not_in_human_takeover_clause(_now()))
+    def test_binds_the_injected_now_not_some_other_clock(self):
+        # Compila com literal_binds para que o valor REAL de `now` apareça no
+        # SQL. Sem isso o teste passaria mesmo se a cláusula ignorasse `now` e
+        # consultasse um relógio próprio — que é exatamente a divergência entre
+        # a forma Python e a forma SQL que este módulo existe para impedir.
+        compiled = str(
+            not_in_human_takeover_clause(_now()).compile(
+                compile_kwargs={"literal_binds": True}
+            )
+        )
+        assert "2026-08-13" in compiled
         assert "human_takeover_until IS NULL" in compiled
         assert "human_takeover_until <=" in compiled
 
     def test_is_an_or_of_exactly_two_conditions(self):
-        compiled = str(not_in_human_takeover_clause(_now()))
-        assert " OR " in compiled
+        # Cardinalidade, não só presença de " OR ": um terceiro operando somado
+        # no futuro violaria a equivalência com a forma Python sem quebrar um
+        # teste de substring.
+        clause = not_in_human_takeover_clause(_now())
+        assert len(clause.clauses) == 2
