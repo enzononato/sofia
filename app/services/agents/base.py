@@ -40,6 +40,8 @@ logger = logging.getLogger(__name__)
 # app.services.ai.MAX_TOOL_ITERATIONS (8) on purpose — a specialist looping
 # this many times without a final answer is itself a signal something's off
 # (wrong agent for this turn, or a tool returning something it can't parse).
+# It's the DEFAULT for run_specialist_loop: the legacy path passes
+# max_iterations=8 explicitly to preserve its historical behavior.
 SPECIALIST_MAX_TOOL_ITERATIONS = 4
 
 # Router-model call tuning: classification only, no creative writing needed.
@@ -89,6 +91,7 @@ async def run_specialist_loop(
     tenant: Tenant,
     contact: Contact,
     ai_cfg: dict,
+    max_iterations: int = SPECIALIST_MAX_TOOL_ITERATIONS,
 ) -> AgentReply:
     """
     Shared tool-calling loop for a single specialist agent (Booking/Sales).
@@ -107,11 +110,17 @@ async def run_specialist_loop(
         temperature=temperature,
         max_output_tokens=max_output_tokens,
         tools=[tools],
+        # Desliga o "thinking": gemini-2.5-flash pensa por padrão, e esses
+        # tokens contam contra max_output_tokens. Em turnos com function call
+        # isso podia queimar o orçamento inteiro antes de emitir qualquer part,
+        # resultando em finish_reason=MAX_TOKENS sem conteúdo. Uma secretária de
+        # WhatsApp fazendo tool call não precisa de raciocínio estendido —
+        # desligar deixa as respostas mais rápidas e evita esse modo de falha.
         thinking_config=types.ThinkingConfig(thinking_budget=0),
     )
 
     empty_retries = 0
-    for iteration in range(SPECIALIST_MAX_TOOL_ITERATIONS):
+    for iteration in range(max_iterations):
         response = await _generate_content_with_retry(client, model, contents, config, tenant, contact, iteration)
 
         candidate = response.candidates[0]
@@ -145,6 +154,16 @@ async def run_specialist_loop(
 
         if function_call_part is None:
             reply = response.text or ""
+            logger.info(
+                "agent_reply_ready",
+                extra={
+                    "model": model,
+                    "iterations": iteration + 1,
+                    "tenant_id": str(tenant.id),
+                    "contact_id": str(contact.id),
+                    "reply_length": len(reply),
+                },
+            )
             return AgentReply(text=reply, model=model)
 
         fn = function_call_part.function_call
@@ -199,7 +218,7 @@ async def run_specialist_loop(
     logger.warning(
         "agent_tool_loop_exhausted",
         extra={
-            "max_iterations": SPECIALIST_MAX_TOOL_ITERATIONS,
+            "max_iterations": max_iterations,
             "tenant_id": str(tenant.id),
             "contact_id": str(contact.id),
         },
@@ -214,6 +233,15 @@ async def run_specialist_loop(
         final_response = await client.aio.models.generate_content(model=model, contents=contents, config=final_config)
         forced_reply = (final_response.text or "").strip()
         if forced_reply:
+            logger.info(
+                "agent_forced_final_reply",
+                extra={
+                    "model": model,
+                    "tenant_id": str(tenant.id),
+                    "contact_id": str(contact.id),
+                    "reply_length": len(forced_reply),
+                },
+            )
             return AgentReply(text=forced_reply, model=model)
     except Exception:
         logger.exception(
