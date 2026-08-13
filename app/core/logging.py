@@ -102,6 +102,7 @@ _EVENT_STYLE: dict[str, tuple[str, str]] = {
     "agent_empty_parts": ("⚠️", "modelo retornou vazio"),
     "agent_tool_loop_exhausted": ("🔁", "loop de ferramentas esgotado"),
     "agent_tool_not_allowed": ("🚫", "ferramenta bloqueada"),
+    "agent_forced_final_failed": ("💥", "resposta final forçada falhou"),
     # Chamada ao Gemini (fora do loop)
     "gemini_call_failed_will_retry": ("💥", "falha na chamada ao modelo"),
     "gemini_call_exhausted": ("💥", "modelo falhou em todas as tentativas"),

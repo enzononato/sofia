@@ -113,12 +113,12 @@ async def run_specialist_loop(
         temperature=temperature,
         max_output_tokens=max_output_tokens,
         tools=[tools],
-        # Desliga o "thinking": gemini-2.5-flash pensa por padrão, e esses
-        # tokens contam contra max_output_tokens. Em turnos com function call
-        # isso podia queimar o orçamento inteiro antes de emitir qualquer part,
-        # resultando em finish_reason=MAX_TOKENS sem conteúdo. Uma secretária de
-        # WhatsApp fazendo tool call não precisa de raciocínio estendido —
-        # desligar deixa as respostas mais rápidas e evita esse modo de falha.
+        # Turn off "thinking": gemini-2.5-flash reasons by default, and those
+        # tokens count against max_output_tokens. On a turn with a function
+        # call this could burn the whole budget before emitting any part,
+        # resulting in finish_reason=MAX_TOKENS with no content. A WhatsApp
+        # secretary making a tool call doesn't need extended reasoning —
+        # turning it off makes replies faster and avoids this failure mode.
         thinking_config=types.ThinkingConfig(thinking_budget=0),
     )
 
@@ -243,7 +243,7 @@ async def run_specialist_loop(
             system_instruction=system_prompt,
             temperature=temperature,
             max_output_tokens=max_output_tokens,
-            # Mesma razão do config principal acima: thinking desligado evita MAX_TOKENS sem conteúdo.
+            # Same reason as the main config above: thinking disabled avoids MAX_TOKENS with no content.
             thinking_config=types.ThinkingConfig(thinking_budget=0),
         )
         final_response = await client.aio.models.generate_content(model=model, contents=contents, config=final_config)

@@ -34,13 +34,13 @@ What it does:
      failed, or were interrupted — never leaves data in the shared DB.
 
 Nothing here mocks Gemini. Tool-call and conversation-stage capture use
-process-local monkeypatches of app.services.ai.execute_tool,
-app.services.ai_stages.analyze, AND (since Wave 3) app.services.agents.base
-.execute_tool (restored on exit) — the multi-agent path (--multi-agent) holds
-its own independent copied reference to execute_tool, so both must be
-patched for the capture log to be trustworthy under either architecture. No
-source file is touched, so there's no risk of merge collisions with other
-work in progress.
+process-local monkeypatches of app.services.ai_stages.analyze and
+app.services.agents.base.execute_tool (restored on exit) — the legacy
+single-agent path and the multi-agent path (--multi-agent) now share one
+tool-calling loop (app/services/agents/base.py::run_specialist_loop), so
+there is a single lookup site to patch for the capture log to be
+trustworthy under either architecture. No source file is touched, so
+there's no risk of merge collisions with other work in progress.
 
 Known limitation: `check_availability` does not currently filter out
 past times-of-day for "today" — the "horario_hoje_tarde" scenario is a
@@ -137,11 +137,6 @@ async def _analyze_capture(db, contact, history):
 
 
 def _install_capture_patches() -> None:
-    # ai.py did `from app.services.ai_tools import execute_tool`, which copies
-    # a direct reference into app.services.ai's own namespace — patching
-    # ai_tools_module.execute_tool would NOT be seen there, so we patch the
-    # name where it's actually looked up.
-    ai_service.execute_tool = _execute_tool_capture
     # ai.py calls `ai_stages.analyze(...)` — a dynamic attribute lookup on the
     # module object, so patching the module attribute directly is enough.
     # This ALSO covers the multi-agent orchestrator (--multi-agent /
@@ -149,14 +144,14 @@ def _install_capture_patches() -> None:
     # same way.
     ai_stages_module.analyze = _analyze_capture
 
-    # Wave 3 (--multi-agent): app/services/agents/base.py ALSO does
-    # `from app.services.ai_tools import execute_tool`, its OWN independent
-    # copied reference — patching ai_service.execute_tool above has NO effect
-    # on it (the same "patch where it's looked up, not where it's defined"
-    # trap this module's own docstring warns about, just missed the second
-    # copy when this file was first written before agents/base.py existed).
-    # Import lazily so this script still runs fine against a revision that
-    # somehow lacks the agents package.
+    # Both the legacy single-agent path (app.services.ai) and the multi-agent
+    # path (--multi-agent / app/services/agents/orchestrator.py) now route
+    # every tool call through the same shared loop,
+    # app/services/agents/base.py::run_specialist_loop, which does
+    # `from app.services.ai_tools import execute_tool` — so there is now a
+    # single lookup site to patch (patch where it's looked up, not where it's
+    # defined). Import lazily so this script still runs fine against a
+    # revision that somehow lacks the agents package.
     try:
         import app.services.agents.base as agents_base_module
 
@@ -167,7 +162,6 @@ def _install_capture_patches() -> None:
 
 
 def _uninstall_capture_patches() -> None:
-    ai_service.execute_tool = _ORIGINAL_EXECUTE_TOOL
     ai_stages_module.analyze = _ORIGINAL_ANALYZE
     agents_base_module = globals().get("_agents_base_module")
     if agents_base_module is not None:

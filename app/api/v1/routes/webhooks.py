@@ -1168,10 +1168,11 @@ async def run_pending_reply_recovery_sweep() -> None:
                 .where(
                     Contact.ai_paused.is_(False),
                     Tenant.is_active.is_(True),
-                    # Item D4: não ressuscitar resposta para contato que um
-                    # humano está atendendo agora. Mesma regra de
-                    # in_human_takeover, na forma SQL — este sweep roda como
-                    # uma query agregada, não por contato.
+                    # Item D4: don't resurrect a reply for a contact a human
+                    # is currently handling by hand — same rule as
+                    # in_human_takeover (app/services/takeover.py), expressed
+                    # as a SQL predicate since this runs as one aggregate
+                    # query, not per-contact.
                     not_in_human_takeover_clause(now),
                 )
             )

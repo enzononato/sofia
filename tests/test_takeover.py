@@ -14,7 +14,7 @@ from app.services.takeover import in_human_takeover, not_in_human_takeover_claus
 
 
 def _now() -> datetime:
-    return datetime(2026, 8, 13, 12, 0, tzinfo=timezone.utc)
+    return datetime(2019, 3, 4, 12, 0, tzinfo=timezone.utc)
 
 
 class TestInHumanTakeover:
@@ -55,7 +55,7 @@ class TestNotInHumanTakeoverClause:
                 compile_kwargs={"literal_binds": True}
             )
         )
-        assert "2026-08-13" in compiled
+        assert "2019-03-04" in compiled
         assert "human_takeover_until IS NULL" in compiled
         assert "human_takeover_until <=" in compiled
 
