@@ -191,8 +191,16 @@ Esperado: **200 passed**.
 
 - [ ] **Step 6: Commit**
 
+**NUNCA use `git add -A` nem `git add .` aqui.** A raiz do repositório tem ~750 KB de documentação de trabalho não rastreada e o diretório gerado `graphify-out/`, que só serão tratados na Tarefa 8 (arquivar + gitignore). Um `add` abrangente varre tudo isso para dentro do commit. Estágie apenas os cinco caminhos desta tarefa, por nome:
+
 ```powershell
-git add -A
+git add frontend/fix_css.js frontend/revert_css.js frontend/fix_opacity.js frontend/form.json backfill_contacts.py scripts/backfill_contacts.py
+git status --short
+```
+
+Conferir que o `git status --short` mostra **exatamente** cinco entradas estagiadas (quatro `D` e um `R`), e nada mais. Só então:
+
+```powershell
 git commit -m "chore: remove scripts one-off de CSS e move backfill_contacts para scripts/"
 ```
 
@@ -581,7 +589,8 @@ Esperado: **207 passed** e `OK`.
 - [ ] **Step 13: Commit**
 
 ```powershell
-git add app/api/v1/routes/webhooks.py app/services/followups.py tests/
+git add app/api/v1/routes/webhooks.py app/services/followups.py tests/test_human_takeover.py
+git status --short
 git commit -m "refactor(takeover): tres expressoes da mesma regra passam a usar takeover.py"
 ```
 
