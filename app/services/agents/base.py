@@ -94,9 +94,12 @@ async def run_specialist_loop(
     max_iterations: int = SPECIALIST_MAX_TOOL_ITERATIONS,
 ) -> AgentReply:
     """
-    Shared tool-calling loop for a single specialist agent (Booking/Sales).
-    Mirrors app.services.ai._legacy_generate_reply's loop shape but
-    parameterized by system_prompt/tools/allowed_tool_names.
+    The single shared tool-calling loop used by every path: the legacy
+    single-agent path (app.services.ai._legacy_generate_reply), the
+    Booking/Sales specialists, and the staff "suggest a reply" copilot
+    (app.services.ai.generate_staff_suggestion). Parameterized by
+    system_prompt/tools/allowed_tool_names/max_iterations so each caller
+    supplies its own prompt, tool set, and iteration budget.
 
     `allowed_tool_names` is enforced HERE, server-side, before any tool name
     reaches app.services.ai_tools.execute_tool — defense in depth beyond
@@ -213,8 +216,9 @@ async def run_specialist_loop(
             )
         )
 
-    # Exhausted the loop without a final text answer — force one last
-    # completion with tools disabled, mirroring the legacy agent's fallback.
+    # Exhausted the loop without a final text answer (the model kept calling
+    # tools). Force one last completion with tools DISABLED so the model must
+    # answer in words using the tool results it has already gathered.
     logger.warning(
         "agent_tool_loop_exhausted",
         extra={
@@ -228,6 +232,7 @@ async def run_specialist_loop(
             system_instruction=system_prompt,
             temperature=temperature,
             max_output_tokens=max_output_tokens,
+            # Mesma razão do config principal acima: thinking desligado evita MAX_TOKENS sem conteúdo.
             thinking_config=types.ThinkingConfig(thinking_budget=0),
         )
         final_response = await client.aio.models.generate_content(model=model, contents=contents, config=final_config)

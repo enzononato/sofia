@@ -32,7 +32,6 @@ tenant.ai_config shape:
 
 import asyncio
 import logging
-import uuid
 from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 
@@ -45,7 +44,7 @@ from app.models.contact import Contact
 from app.models.message import Message, MessageDirection
 from app.models.tenant import Tenant
 from app.services import ai_stages
-from app.services.ai_tools import CLINIC_TOOLS, execute_tool, _clinic_tz, _fmt_local
+from app.services.ai_tools import CLINIC_TOOLS, _clinic_tz, _fmt_local
 from app.services.prompts import BOOKING_PLAYBOOK, SALES_PLAYBOOK, SOFIA_CORE_PROMPT
 
 logger = logging.getLogger(__name__)
@@ -362,9 +361,12 @@ async def _legacy_generate_reply(
     media: tuple[bytes, str] | list[tuple[bytes, str]] | None = None,
 ) -> tuple[str, str]:
     """
-    Single-agent path (pre-Wave-3): one big prompt + all 12 tools declared,
-    one tool-calling loop. This is the function generate_reply() used to be,
-    verbatim — renamed so the multi-agent path (app/services/agents/orchestrator.py)
+    Single-agent path (pre-Wave-3): um prompt único com as 11 tools de
+    CLINIC_TOOLS declaradas. O loop de tool-calling em si é o compartilhado
+    (app/services/agents/base.py::run_specialist_loop), com max_iterations=8;
+    o que distingue este caminho é o prompt monolítico e o conjunto completo
+    de tools, não um loop próprio. This is the function generate_reply() used
+    to be — renamed so the multi-agent path (app/services/agents/orchestrator.py)
     can be dispatched to instead when AI_MULTI_AGENT_ENABLED (or the tenant
     override) is on. See generate_reply() below for the dispatcher.
 
@@ -432,177 +434,32 @@ async def _legacy_generate_reply(
     # history-annotation behavior).
     contents = build_conversation_contents(tenant, history, new_message, media_items)
 
-    config = types.GenerateContentConfig(
-        system_instruction=system_prompt,
+    # Um único loop de tool-calling para todos os caminhos (legacy, specialists
+    # e o copiloto "Sugerir resposta"). Import tardio de propósito:
+    # agents/base.py importa _generate_content_with_retry deste módulo no nível
+    # de módulo, então importar no topo criaria ciclo — mesmo truque usado em
+    # generate_staff_suggestion.
+    from app.services.agents.base import run_specialist_loop
+
+    reply = await run_specialist_loop(
+        client=client,
+        model=model,
         temperature=temperature,
         max_output_tokens=max_output_tokens,
-        tools=[CLINIC_TOOLS],
-        # Disable "thinking": gemini-2.5-flash thinks by default, and those
-        # thinking tokens count against max_output_tokens. On tool-calling turns
-        # that could burn the whole budget before any part was emitted, yielding
-        # finish_reason=MAX_TOKENS with no content. A WhatsApp secretary doing
-        # function calls doesn't need extended reasoning — turning it off makes
-        # replies snappier and avoids the empty-response failure mode.
-        thinking_config=types.ThinkingConfig(thinking_budget=0),
+        system_prompt=system_prompt,
+        tools=CLINIC_TOOLS,
+        # O caminho legacy declara TODAS as tools, então o gate de allowlist é
+        # no-op aqui. Derivado da própria declaração para nunca virar uma lista
+        # literal que possa dessincronizar de CLINIC_TOOLS.
+        allowed_tool_names={d.name for d in CLINIC_TOOLS.function_declarations},
+        contents=contents,
+        db=db,
+        tenant=tenant,
+        contact=contact,
+        ai_cfg=ai_cfg,
+        max_iterations=MAX_TOOL_ITERATIONS,
     )
-
-    # Tool-calling loop
-    empty_retries = 0  # Gemini occasionally returns an empty candidate; retry once.
-    for iteration in range(MAX_TOOL_ITERATIONS):
-        logger.debug(
-            "gemini_iteration",
-            extra={
-                "iteration": iteration,
-                "model": model,
-                "tenant_id": str(tenant.id),
-                "contact_id": str(contact.id),
-            },
-        )
-
-        response = await _generate_content_with_retry(client, model, contents, config, tenant, contact, iteration)
-
-        candidate = response.candidates[0]
-        response_content = candidate.content
-
-        # Gemini can return a candidate with no content/parts — e.g. finish_reason
-        # MAX_TOKENS (thinking models can burn the whole budget before emitting a
-        # part), a safety block, or RECITATION. Iterating None here would crash the
-        # whole reply, so degrade gracefully to whatever text we have.
-        parts = response_content.parts if response_content is not None else None
-        if not parts:
-            finish_reason = getattr(candidate, "finish_reason", None)
-            logger.warning(
-                "gemini_empty_parts",
-                extra={
-                    "finish_reason": str(finish_reason),
-                    "iteration": iteration,
-                    "retry": empty_retries,
-                    "model": model,
-                    "tenant_id": str(tenant.id),
-                    "contact_id": str(contact.id),
-                },
-            )
-            fallback = (getattr(response, "text", None) or "").strip()
-            if fallback:
-                return fallback, model
-            # Empty candidates are often transient (seen on single audio turns).
-            # Retry the SAME request once before giving up — contents are
-            # unchanged, so `continue` just re-generates. Only asking the patient
-            # to resend as a last resort avoids the "reenvie" loop on a fluke.
-            if empty_retries < 1:
-                empty_retries += 1
-                continue
-            return (
-                "Desculpe, tive um probleminha para processar sua mensagem agora. "
-                "Pode me mandar de novo, por favor? 😊",
-                model,
-            )
-
-        # Check if the response contains a function call
-        function_call_part = next(
-            (p for p in parts if p.function_call is not None),
-            None,
-        )
-
-        if function_call_part is None:
-            # Pure text response — we're done
-            reply = response.text or ""
-            logger.info(
-                "gemini_reply_ready",
-                extra={
-                    "model": model,
-                    "iterations": iteration + 1,
-                    "tenant_id": str(tenant.id),
-                    "contact_id": str(contact.id),
-                    "reply_length": len(reply),
-                },
-            )
-            return reply, model
-
-        # Execute the tool
-        fn = function_call_part.function_call
-        tool_result = await execute_tool(
-            name=fn.name,
-            args=dict(fn.args),
-            db=db,
-            tenant_id=uuid.UUID(str(tenant.id)),
-            contact_id=uuid.UUID(str(contact.id)),
-            tenant_settings=tenant.settings,
-            ai_config=ai_cfg,
-            tenant_name=tenant.name,
-        )
-
-        logger.info(
-            "ai_tool_executed",
-            extra={
-                "tool": fn.name,
-                "tenant_id": str(tenant.id),
-                "contact_id": str(contact.id),
-                "iteration": iteration,
-                "result_keys": list(tool_result.keys()) if isinstance(tool_result, dict) else None,
-            },
-        )
-
-        # Append model's function_call turn + our function_response turn to the conversation
-        contents.append(response_content)
-        contents.append(
-            types.Content(
-                role="user",
-                parts=[
-                    types.Part(
-                        function_response=types.FunctionResponse(
-                            name=fn.name,
-                            response=tool_result,
-                        )
-                    )
-                ],
-            )
-        )
-
-    # Exhausted the tool loop without a final text answer (the model kept calling
-    # tools). Instead of dumping a generic error on the patient, force ONE last
-    # completion with tools DISABLED so the model must answer in words using the
-    # tool results it has already gathered.
-    logger.warning(
-        "gemini_tool_loop_exhausted",
-        extra={
-            "max_iterations": MAX_TOOL_ITERATIONS,
-            "tenant_id": str(tenant.id),
-            "contact_id": str(contact.id),
-        },
-    )
-    try:
-        final_config = types.GenerateContentConfig(
-            system_instruction=system_prompt,
-            temperature=temperature,
-            max_output_tokens=max_output_tokens,
-            # No tools → the model cannot call a function and must produce text.
-            thinking_config=types.ThinkingConfig(thinking_budget=0),
-        )
-        final_response = await client.aio.models.generate_content(
-            model=model,
-            contents=contents,
-            config=final_config,
-        )
-        forced_reply = (final_response.text or "").strip()
-        if forced_reply:
-            logger.info(
-                "gemini_forced_final_reply",
-                extra={
-                    "model": model,
-                    "tenant_id": str(tenant.id),
-                    "contact_id": str(contact.id),
-                    "reply_length": len(forced_reply),
-                },
-            )
-            return forced_reply, model
-    except Exception:
-        logger.exception(
-            "gemini_forced_final_failed",
-            extra={"model": model, "tenant_id": str(tenant.id), "contact_id": str(contact.id)},
-        )
-
-    return "Desculpe, não consegui processar sua solicitação no momento. Tente novamente.", model
+    return reply.text, reply.model
 
 
 # Read-only tool subset for the STAFF "suggest a reply" copilot: consult-only
