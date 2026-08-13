@@ -36,3 +36,9 @@ wheels/
 # OS
 .DS_Store
 Thumbs.db
+
+# Documentação arquivada (material de trabalho, não versionado)
+docs/archive/
+
+# Artefato gerado pelo graphify
+graphify-out/
